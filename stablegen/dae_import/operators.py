@@ -393,7 +393,11 @@ class ImportDAE(bpy.types.Operator):
 
 
 class BatchImportDAE(bpy.types.Operator):
-    """Batch import and preprocess all .dae files from a directory."""
+    """Batch import and convert all .dae files from a directory to .glb/.fbx.
+
+    Clears the scene between each file, processes with the same cleanup/topology
+    pipeline as single import, and exports the result. Supports recursive
+    directory scanning — the output mirrors the source folder structure."""
 
     bl_idname = "stablegen.batch_import_dae"
     bl_label = "Batch Import DAE Files"
@@ -416,41 +420,125 @@ class BatchImportDAE(bpy.types.Operator):
         items=[
             ('GLB', ".glb", "glTF Binary"),
             ('FBX', ".fbx", "FBX"),
-            ('NONE', "Don't Export", "Keep in scene only"),
         ],
         default='GLB',
     )  # type: ignore
 
     output_dir: bpy.props.StringProperty(
         name="Output Directory",
-        description="Directory to save processed models (defaults to 'processed' subfolder)",
-        subtype='DIR_PATH',
+        description="Directory to save processed models (defaults to 'processed' subfolder). Type path manually",
         default="",
     )  # type: ignore
 
-    # Inherit cleanup/topology settings from ImportDAE
+    recursive: bpy.props.BoolProperty(
+        name="Recursive",
+        description="Scan subdirectories recursively. Output mirrors the source folder structure",
+        default=True,
+    )  # type: ignore
+
+    # ── Cleanup options ──
+
     merge_threshold: bpy.props.FloatProperty(
-        name="Merge Distance", default=0.0001, min=0.0, max=0.1,
-        precision=5, unit='LENGTH',
+        name="Merge Distance",
+        description=(
+            "Distance below which vertices are considered coincident and merged. "
+            "Default 1mm is safe for architectural models"
+        ),
+        default=0.001,
+        min=0.0,
+        max=0.1,
+        precision=4,
+        unit='LENGTH',
+    )  # type: ignore
+
+    remove_interior: bpy.props.BoolProperty(
+        name="Remove Interior Faces",
+        description="Detect and remove faces fully enclosed inside the mesh (internal walls/partitions)",
+        default=True,
     )  # type: ignore
 
     strip_materials: bpy.props.BoolProperty(
-        name="Replace Materials", default=True,
+        name="Replace Materials",
+        description="Strip all imported materials and apply a clean Principled BSDF",
+        default=True,
     )  # type: ignore
+
+    triangulate: bpy.props.BoolProperty(
+        name="Triangulate",
+        description="Convert all faces to triangles",
+        default=True,
+    )  # type: ignore
+
+    # ── Topology options ──
 
     topology_method: bpy.props.EnumProperty(
         name="Topology",
+        description="Method to improve mesh topology after cleanup",
         items=[
             ('NONE', "None", "Keep original topology"),
-            ('PLANAR_SUBDIVIDE', "Planar Dissolve + Subdivide", "Best for buildings"),
-            ('SUBDIVIDE_ONLY', "Subdivide Large Faces", "Conservative"),
-            ('VOXEL', "Voxel Remesh", "Full remesh"),
+            ('FIX_FANS', "Fix Triangle Fans",
+             "Only fixes fan patterns on flat surfaces. "
+             "Also subdivides any remaining large faces"),
+            ('SUBDIVIDE_ONLY', "Subdivide Large Faces",
+             "Subdivide only faces above a threshold area"),
+            ('PLANAR_SUBDIVIDE', "Dissolve + Subdivide",
+             "Merge coplanar triangles then retriangulate"),
+            ('VOXEL', "Voxel Remesh", "Full remesh with uniform voxel size"),
         ],
-        default='PLANAR_SUBDIVIDE',
+        default='FIX_FANS',
     )  # type: ignore
 
+    edge_ratio: bpy.props.FloatProperty(
+        name="Edge Ratio",
+        description="Edges longer than median × this ratio get split",
+        default=2.5,
+        min=1.5,
+        max=10.0,
+        precision=1,
+    )  # type: ignore
+
+    equalize_iterations: bpy.props.IntProperty(
+        name="Equalize Passes",
+        description="Number of edge-splitting passes to equalize triangle density",
+        default=4,
+        min=0,
+        max=10,
+    )  # type: ignore
+
+    voxel_size: bpy.props.FloatProperty(
+        name="Voxel Size",
+        description="Voxel size for remesh (0 = auto-calculate)",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        precision=4,
+        unit='LENGTH',
+    )  # type: ignore
+
+    # ── Scale / orientation ──
+
     auto_scale: bpy.props.FloatProperty(
-        name="Target Size (BU)", default=0.0, min=0.0, max=100.0,
+        name="Target Size (BU)",
+        description="Scale so largest dimension equals this value. 0 = keep original",
+        default=0.0,
+        min=0.0,
+        max=100.0,
+    )  # type: ignore
+
+    shading_mode: bpy.props.EnumProperty(
+        name="Shading",
+        items=[
+            ('FLAT', "Flat", "Flat shading"),
+            ('SMOOTH', "Smooth", "Smooth shading"),
+            ('AUTO', "Auto Smooth", "Smooth with auto-smooth angle"),
+        ],
+        default='FLAT',
+    )  # type: ignore
+
+    center_origin: bpy.props.BoolProperty(
+        name="Center at Origin",
+        description="Move each model so its center is at the world origin",
+        default=True,
     )  # type: ignore
 
     @classmethod
@@ -461,57 +549,137 @@ class BatchImportDAE(bpy.types.Operator):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
+    def draw(self, context):
+        layout = self.layout
+
+        layout.label(text="Export", icon='EXPORT')
+        box = layout.box()
+        box.prop(self, "export_format")
+        box.prop(self, "output_dir")
+        box.prop(self, "recursive")
+
+        layout.separator()
+        layout.label(text="Cleanup", icon='BRUSH_DATA')
+        box = layout.box()
+        box.prop(self, "merge_threshold")
+        box.prop(self, "remove_interior")
+        box.prop(self, "strip_materials")
+        box.prop(self, "triangulate")
+
+        layout.separator()
+        layout.label(text="Topology", icon='MOD_REMESH')
+        box = layout.box()
+        box.prop(self, "topology_method")
+        if self.topology_method == 'FIX_FANS':
+            box.prop(self, "edge_ratio")
+            box.prop(self, "equalize_iterations")
+        elif self.topology_method == 'VOXEL':
+            box.prop(self, "voxel_size")
+
+        layout.separator()
+        layout.label(text="Transform", icon='OBJECT_ORIGIN')
+        box = layout.box()
+        box.prop(self, "auto_scale")
+        box.prop(self, "shading_mode")
+        box.prop(self, "center_origin")
+
+    def _collect_dae_files(self):
+        """Return list of (absolute_path, relative_path) tuples for .dae files."""
+        root = self.directory.rstrip('/\\')
+        results = []
+        if self.recursive:
+            for dirpath, _dirs, files in os.walk(root):
+                for f in sorted(files):
+                    if f.lower().endswith('.dae'):
+                        abs_path = os.path.join(dirpath, f)
+                        rel_path = os.path.relpath(abs_path, root)
+                        results.append((abs_path, rel_path))
+        else:
+            for f in sorted(os.listdir(root)):
+                if f.lower().endswith('.dae'):
+                    results.append((os.path.join(root, f), f))
+        return results
+
     def execute(self, context):
         if not self.directory or not os.path.isdir(self.directory):
             self.report({'ERROR'}, "No valid directory selected")
             return {'CANCELLED'}
 
-        dae_files = sorted(
-            f for f in os.listdir(self.directory)
-            if f.lower().endswith('.dae')
-        )
+        dae_files = self._collect_dae_files()
         if not dae_files:
-            self.report({'WARNING'}, "No .dae files found in the directory")
+            self.report({'WARNING'}, "No .dae files found")
             return {'CANCELLED'}
 
-        out_dir = self.output_dir or os.path.join(self.directory, "processed")
-        if self.export_format != 'NONE':
-            os.makedirs(out_dir, exist_ok=True)
+        out_dir = self.output_dir or os.path.join(
+            self.directory.rstrip('/\\'), "processed")
+        os.makedirs(out_dir, exist_ok=True)
 
+        import time
+        t0 = time.monotonic()
         processed = 0
-        for filename in dae_files:
-            filepath = os.path.join(self.directory, filename)
-            name = os.path.splitext(filename)[0]
+        failed = []
+        total = len(dae_files)
 
-            # Clear scene for each file
+        wm = context.window_manager
+        wm.progress_begin(0, total)
+
+        for i, (filepath, rel_path) in enumerate(dae_files):
+            name = os.path.splitext(os.path.basename(filepath))[0]
+            print(f"[BatchDAE] {i + 1}/{total}: {rel_path}")
+            wm.progress_update(i)
+
+            # Clear scene
             bpy.ops.object.select_all(action='SELECT')
             bpy.ops.object.delete(use_global=False)
 
-            # Use the single-file operator logic
-            bpy.ops.stablegen.import_dae(
-                filepath=filepath,
-                merge_threshold=self.merge_threshold,
-                remove_interior=False,
-                strip_materials=self.strip_materials,
-                topology_method=self.topology_method,
-                auto_scale=self.auto_scale,
-                shading_mode='FLAT',
-                join_meshes=True,
-            )
+            try:
+                bpy.ops.stablegen.import_dae(
+                    filepath=filepath,
+                    merge_threshold=self.merge_threshold,
+                    remove_interior=self.remove_interior,
+                    strip_materials=self.strip_materials,
+                    topology_method=self.topology_method,
+                    edge_ratio=self.edge_ratio,
+                    equalize_iterations=self.equalize_iterations,
+                    voxel_size=self.voxel_size,
+                    auto_scale=self.auto_scale,
+                    shading_mode=self.shading_mode,
+                    center_origin=self.center_origin,
+                    join_meshes=True,
+                    triangulate=self.triangulate,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"[BatchDAE] FAILED to import {rel_path}: {exc}")
+                failed.append(rel_path)
+                continue
 
-            # Export if requested
-            if self.export_format == 'GLB':
-                out_path = os.path.join(out_dir, f"{name}.glb")
-                bpy.ops.export_scene.gltf(filepath=out_path)
-                self.report({'INFO'}, f"Exported: {out_path}")
-            elif self.export_format == 'FBX':
-                out_path = os.path.join(out_dir, f"{name}.fbx")
-                bpy.ops.export_scene.fbx(filepath=out_path)
-                self.report({'INFO'}, f"Exported: {out_path}")
+            # Build output path mirroring directory structure
+            rel_dir = os.path.dirname(rel_path)
+            file_out_dir = os.path.join(out_dir, rel_dir) if rel_dir else out_dir
+            os.makedirs(file_out_dir, exist_ok=True)
+
+            try:
+                if self.export_format == 'GLB':
+                    out_path = os.path.join(file_out_dir, f"{name}.glb")
+                    bpy.ops.export_scene.gltf(filepath=out_path)
+                elif self.export_format == 'FBX':
+                    out_path = os.path.join(file_out_dir, f"{name}.fbx")
+                    bpy.ops.export_scene.fbx(filepath=out_path)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[BatchDAE] FAILED to export {rel_path}: {exc}")
+                failed.append(rel_path)
+                continue
 
             processed += 1
 
-        self.report({'INFO'}, f"Batch processed {processed} DAE files")
+        elapsed = time.monotonic() - t0
+        wm.progress_end()
+        msg = f"Batch: {processed}/{total} files in {elapsed:.1f}s"
+        if failed:
+            msg += f" ({len(failed)} failed)"
+            for f in failed:
+                print(f"[BatchDAE] Failed: {f}")
+        self.report({'INFO'}, msg)
         return {'FINISHED'}
 
 
