@@ -1654,8 +1654,8 @@ prompt_text_trellis2 = """
   "2": {
     "inputs": {
       "resolution": "1024_cascade",
-      "attn_backend": "flash_attn",
-      "vram_mode": "disk_offload"
+      "precision": "auto",
+      "attn_backend": "auto"
     },
     "class_type": "LoadTrellis2Models",
     "_meta": {
@@ -1677,7 +1677,6 @@ prompt_text_trellis2 = """
       "model_config": ["2", 0],
       "image": ["3", 0],
       "mask": ["3", 1],
-      "include_1024": true,
       "background_color": "black"
     },
     "class_type": "Trellis2GetConditioning",
@@ -1746,8 +1745,8 @@ prompt_text_trellis2_shape_only = """
   "2": {
     "inputs": {
       "resolution": "1024_cascade",
-      "attn_backend": "flash_attn",
-      "vram_mode": "disk_offload"
+      "precision": "auto",
+      "attn_backend": "auto"
     },
     "class_type": "LoadTrellis2Models",
     "_meta": {
@@ -1769,7 +1768,6 @@ prompt_text_trellis2_shape_only = """
       "model_config": ["2", 0],
       "image": ["3", 0],
       "mask": ["3", 1],
-      "include_1024": true,
       "background_color": "black"
     },
     "class_type": "Trellis2GetConditioning",

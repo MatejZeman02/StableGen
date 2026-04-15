@@ -232,7 +232,7 @@ class _Trellis2WorkflowMixin:
 
         # Configure model settings from scene properties
         prompt[NODES['load_models']]["inputs"]["resolution"] = scene.trellis2_resolution
-        prompt[NODES['load_models']]["inputs"]["vram_mode"] = scene.trellis2_vram_mode
+        prompt[NODES['load_models']]["inputs"]["precision"] = scene.trellis2_precision
         prompt[NODES['load_models']]["inputs"]["attn_backend"] = scene.trellis2_attn_backend
 
         # Configure background removal (or bypass it)
@@ -252,8 +252,6 @@ class _Trellis2WorkflowMixin:
 
         # Configure conditioning
         prompt[NODES['get_conditioning']]["inputs"]["background_color"] = scene.trellis2_background_color
-        # Auto-determine whether 1024 conditioning is needed from resolution mode
-        prompt[NODES['get_conditioning']]["inputs"]["include_1024"] = scene.trellis2_resolution != '512'
 
         # Configure shape generation
         seed = scene.trellis2_seed

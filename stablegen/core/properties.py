@@ -1202,29 +1202,31 @@ def register_properties(update_model_list, ControlNetUnit, LoRAUnit,
         name="Resolution", description="Model resolution for generation. Higher values use more VRAM",
         items=[
             ('512', '512', 'Low resolution, fast, less VRAM'),
-            ('1024', '1024', 'Direct 1024 generation with higher sparse structure resolution'),
             ('1024_cascade', '1024 Cascade', 'Medium resolution with cascade (recommended)'),
             ('1536_cascade', '1536 Cascade', 'High resolution with cascade, most VRAM'),
         ],
         default='1024_cascade', update=update_parameters
     )
-    bpy.types.Scene.trellis2_vram_mode = bpy.props.EnumProperty(
-        name="VRAM Mode", description="Controls model offloading strategy to manage VRAM usage",
+    bpy.types.Scene.trellis2_precision = bpy.props.EnumProperty(
+        name="Precision", description="Model precision. Auto selects best for your GPU",
         items=[
-            ('keep_loaded', 'Keep Loaded', 'Keep all models in VRAM (fastest, ~12GB VRAM)'),
-            ('disk_offload', 'Disk Offload', 'Load models on demand from disk (recommended for <=16GB VRAM)'),
+            ('auto', 'Auto', 'Best for your GPU (bf16 on Ampere+, fp16 on Volta/Turing, fp32 on older)'),
+            ('bf16', 'BF16', 'BFloat16 (Ampere+ GPUs)'),
+            ('fp16', 'FP16', 'Float16 (most GPUs)'),
+            ('fp32', 'FP32', 'Float32 (slowest, most compatible)'),
         ],
-        default='disk_offload', update=update_parameters
+        default='auto', update=update_parameters
     )
     bpy.types.Scene.trellis2_attn_backend = bpy.props.EnumProperty(
-        name="Attention Backend", description="Attention implementation to use. flash_attn is fastest but requires CUDA",
+        name="Attention Backend", description="Attention implementation to use",
         items=[
+            ('auto', 'Auto', 'Best available (sageattn > flash_attn > xformers > sdpa)'),
             ('flash_attn', 'Flash Attention', 'Fastest (requires flash-attn package)'),
             ('xformers', 'xFormers', 'Fast (requires xformers package)'),
             ('sdpa', 'SDPA', 'PyTorch native, always available'),
             ('sageattn', 'SageAttention', 'SageAttention backend (requires sageattn package)'),
         ],
-        default='flash_attn', update=update_parameters
+        default='auto', update=update_parameters
     )
     bpy.types.Scene.trellis2_seed = bpy.props.IntProperty(
         name="Seed", description="Random seed for generation (0 = random)",
@@ -1608,7 +1610,7 @@ def unregister_properties(load_handler, _sg_queue_load_handler):
         'trellis2_preview_gallery_enabled', 'trellis2_preview_gallery_count',
         'trellis2_input_image', 'trellis2_batch_folder', 'trellis2_batch_count',
         'trellis2_batch_rename_meshes',
-        'trellis2_resolution', 'trellis2_vram_mode',
+        'trellis2_resolution', 'trellis2_precision',
         'trellis2_attn_backend', 'trellis2_seed', 'trellis2_ss_guidance',
         'trellis2_ss_steps', 'trellis2_shape_guidance', 'trellis2_shape_steps',
         'trellis2_tex_guidance', 'trellis2_tex_steps', 'trellis2_max_tokens',

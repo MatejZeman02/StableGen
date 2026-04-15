@@ -824,8 +824,8 @@ class StableGenPanel(bpy.types.Panel):
                     split.prop(scene, "trellis2_resolution", text="")
 
                     split = content_box.split(factor=0.5)
-                    split.label(text="VRAM Mode:")
-                    split.prop(scene, "trellis2_vram_mode", text="")
+                    split.label(text="Precision:")
+                    split.prop(scene, "trellis2_precision", text="")
 
                     split = content_box.split(factor=0.5)
                     split.label(text="Attention:")
