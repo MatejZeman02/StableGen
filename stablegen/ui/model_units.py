@@ -43,6 +43,8 @@ def update_union(self, context):
 
 
 def update_controlnet(self, context):
+    if hasattr(self, "model_name") and self.model_name and self.model_name not in ("REFRESH", "NO_ASSIGNED", "NO_PREFS"):
+        self.model_name_backup = self.model_name
     update_parameters(self, context)
     update_union(self, context)
     return None
@@ -73,7 +75,20 @@ def get_controlnet_models(context, unit_type):
         return [("NO_ASSIGNED", f"No models assigned to '{unit_type}'",
                  "Assign types in Addon Preferences or Refresh")]
 
-    items.sort(key=lambda x: x[1])
+    # Sort compatible models first based on the current architecture mode
+    scene = context.scene if hasattr(context, "scene") else None
+    arch = getattr(scene, "architecture_mode", "sdxl") if scene else "sdxl"
+    is_flux = "flux" in arch.lower()
+
+    def sort_key(item_tuple):
+        name_lower = item_tuple[0].lower()
+        if is_flux:
+            is_compat = ("flux" in name_lower)
+        else:
+            is_compat = ("flux" not in name_lower)
+        return (-int(is_compat), item_tuple[1].lower())
+
+    items.sort(key=sort_key)
     return items
 
 
@@ -99,6 +114,11 @@ class ControlNetUnit(bpy.types.PropertyGroup):
         description="Select the ControlNet model",
         items=lambda self, context: get_controlnet_models(context, self.unit_type),
         update=update_controlnet
+    )  # type: ignore
+    model_name_backup: bpy.props.StringProperty(
+        name="Model Name Backup",
+        description="Backup of the selected ControlNet model name",
+        default=""
     )  # type: ignore
     strength: bpy.props.FloatProperty(
         name="Strength",

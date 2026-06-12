@@ -352,6 +352,8 @@ class Trellis2Generate(bpy.types.Operator):
 
             # --- Clean hierarchy, unparent meshes, and remove GLTF/GLB structural empties ---
             imported_objects = [obj for obj in context.selected_objects]
+            for obj in imported_objects:
+                obj["sg_generated"] = True
             mesh_objects = [obj for obj in imported_objects if obj.type == 'MESH']
             empty_objects = [obj for obj in imported_objects if obj.type == 'EMPTY']
 

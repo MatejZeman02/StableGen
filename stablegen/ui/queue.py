@@ -318,6 +318,9 @@ class SceneQueueAdd(bpy.types.Operator):
         # BEFORE saving so the copy carries the correct value even if
         # the dynamic Enum resolves wrong on re-open (stale item cache).
         scene.sg_model_name_backup = scene.model_name
+        for unit in scene.controlnet_units:
+            if unit.model_name and unit.model_name not in ("REFRESH", "NO_ASSIGNED", "NO_PREFS"):
+                unit.model_name_backup = unit.model_name
         try:
             bpy.ops.wm.save_as_mainfile(filepath=copy_path, copy=True)
         except Exception as e:
@@ -544,11 +547,19 @@ class SceneQueueInvalidate(bpy.types.Operator):
             self.report({'ERROR'}, f"Failed to open snapshot: {e}")
             return {'CANCELLED'}
 
-        # Remove all mesh objects and cameras from the scene
+        # Remove generated objects only if in trellis2 mode; preserve source meshes/cameras in texturing
         scene = bpy.context.scene
-        to_remove = [obj for obj in scene.objects if obj.type in {'MESH', 'CAMERA', 'EMPTY'}]
-        for obj in to_remove:
-            bpy.data.objects.remove(obj, do_unlink=True)
+        arch_mode = getattr(scene, 'architecture_mode', 'sdxl')
+        if arch_mode == 'trellis2':
+            to_remove = []
+            for obj in scene.objects:
+                if obj.get("sg_generated") or obj.name.lower().startswith("trellis2") or obj.type == 'EMPTY':
+                    to_remove.append(obj)
+            for obj in to_remove:
+                try:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                except Exception as err:
+                    print(f"[Queue] Failed to remove generated object {obj.name}: {err}")
 
         # Purge orphaned data
         for block_attr in ('meshes', 'cameras', 'materials', 'images'):

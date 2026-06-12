@@ -47,6 +47,17 @@ def load_handler(dummy):
         default_unit = scene.controlnet_units.add()
         default_unit.unit_type = 'depth'
 
+    # Restore ControlNet unit selections from backup
+    if hasattr(scene, "controlnet_units"):
+        for unit in scene.controlnet_units:
+            backup = getattr(unit, "model_name_backup", "")
+            if backup and backup not in ("REFRESH", "NO_ASSIGNED", "NO_PREFS"):
+                try:
+                    unit.model_name = backup
+                except TypeError:
+                    # Model not in enum items yet, which is fine
+                    pass
+
     # Default LoRA unit
     if hasattr(scene, "lora_units") and not scene.lora_units:
         default_lora_filename_to_find = None
