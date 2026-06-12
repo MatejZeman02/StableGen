@@ -520,7 +520,7 @@ DEPENDENCIES: Dict[str, Dict[str, Any]] = {
         "target_dir_relative": "custom_nodes",
         "repo_name": "ComfyUI-Marigold",
         "license": "GPL-3.0", "packages": ["pbr_marigold"],
-        "pip_packages": ["diffusers>=0.28", "matplotlib"] + (["triton-windows"] if sys.platform == "win32" else []),
+        "pip_packages": ["diffusers>=0.28", "accelerate", "matplotlib"] + (["triton-windows"] if sys.platform == "win32" else []),
         "run_install_script": True,
     },
     # --- StableDelight (specular-free albedo) ---
@@ -530,6 +530,7 @@ DEPENDENCIES: Dict[str, Dict[str, Any]] = {
         "target_dir_relative": "custom_nodes",
         "repo_name": "ComfyUI_StableDelight_ll",
         "license": "Apache-2.0", "packages": ["pbr_stabledelight"],
+        "pip_packages": ["diffusers>=0.28", "accelerate", "matplotlib"] + (["triton-windows"] if sys.platform == "win32" else []),
         "post_clone_patches": [
             {
                 "file": "nodes/BaseNode.py",
