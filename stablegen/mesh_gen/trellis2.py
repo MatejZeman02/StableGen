@@ -199,10 +199,14 @@ class Trellis2Generate(bpy.types.Operator):
         gen_dirs = get_generation_dirs(context)
         revision_dir = gen_dirs.get("revision", "")
 
+        # Read parameters for background processing
+        decimate_method = getattr(scene, 'trellis2_decimate_method', 'server')
+        target_faces = getattr(scene, 'trellis2_decimation', 1000000)
+
         # Start generation in background thread
         self._thread = threading.Thread(
             target=self._run_trellis2,
-            args=(context, image_path, gen_from, revision_dir),
+            args=(context, image_path, gen_from, revision_dir, decimate_method, target_faces),
             daemon=True
         )
         self._thread.start()
@@ -346,15 +350,49 @@ class Trellis2Generate(bpy.types.Operator):
             # Import GLB into Blender
             bpy.ops.import_scene.gltf(filepath=glb_path)
 
+            # --- Clean hierarchy, unparent meshes, and remove GLTF/GLB structural empties ---
+            imported_objects = [obj for obj in context.selected_objects]
+            mesh_objects = [obj for obj in imported_objects if obj.type == 'MESH']
+            empty_objects = [obj for obj in imported_objects if obj.type == 'EMPTY']
+
+            if mesh_objects:
+                # 1. Unparent meshes while preserving their world space transforms and clearing broken custom normals
+                for obj in mesh_objects:
+                    # Save world matrix
+                    world_mat = obj.matrix_world.copy()
+                    # Set the object as active so the operator can work on it
+                    bpy.context.view_layer.objects.active = obj
+                    # Clear custom split normals using the official operator to fix broken custom normals & convex shadowing artifacts
+                    try:
+                        bpy.ops.mesh.customdata_custom_splitnormals_clear()
+                    except Exception as err:
+                        print(f"[TRELLIS2] Warning: Could not clear custom normals on {obj.name}: {err}")
+                    # Unparent
+                    obj.parent = None
+                    # Restore world matrix
+                    obj.matrix_world = world_mat
+                    
+                # 2. Delete the structural empties (e.g. "world", "geometry_0")
+                if empty_objects:
+                    bpy.ops.object.select_all(action='DESELECT')
+                    for obj in empty_objects:
+                        obj.select_set(True)
+                    bpy.ops.object.delete()
+                    print(f"[TRELLIS2] Cleaned up {len(empty_objects)} GLB parent empty objects")
+
+                # 3. Reselect only the imported mesh objects for downstream processing
+                bpy.ops.object.select_all(action='DESELECT')
+                for obj in mesh_objects:
+                    obj.select_set(True)
+                bpy.context.view_layer.objects.active = mesh_objects[0]
+
             # --- Normalise imported mesh to a reasonable Blender-unit size ---
             target_bu = getattr(context.scene, 'trellis2_import_scale', 2.0)
             if target_bu > 0:
-                imported_objects = [obj for obj in context.selected_objects]
-                if imported_objects:
-                    # Compute combined world-space bounding box across all
-                    # imported objects (meshes, empties, armatures …).
+                imported_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+                if imported_meshes:
                     all_corners = []
-                    for obj in imported_objects:
+                    for obj in imported_meshes:
                         for corner in obj.bound_box:
                             all_corners.append(obj.matrix_world @ mathutils.Vector(corner))
                     if all_corners:
@@ -368,24 +406,84 @@ class Trellis2Generate(bpy.types.Operator):
                         )
                         if extent > 1e-6:
                             scale_factor = target_bu / extent
-                            # Find the root objects (those without an imported parent)
-                            roots = [o for o in imported_objects if o.parent not in imported_objects]
-                            for root in roots:
-                                root.scale *= scale_factor
+                            for obj in imported_meshes:
+                                obj.scale *= scale_factor
                             # Apply scale so downstream code sees unit scale
                             bpy.ops.object.select_all(action='DESELECT')
-                            for obj in imported_objects:
+                            for obj in imported_meshes:
                                 obj.select_set(True)
-                            bpy.context.view_layer.objects.active = imported_objects[0]
+                            bpy.context.view_layer.objects.active = imported_meshes[0]
                             bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
                             print(f"[TRELLIS2] Scaled mesh to {target_bu} BU (factor {scale_factor:.4f})")
+
+            # --- Solidification ---
+            solidify_mesh = getattr(context.scene, 'trellis2_solidify', False)
+            if solidify_mesh:
+                from ..texturing.print_export import _make_solid_mesh_object
+                imported_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+                for obj in imported_meshes:
+                    try:
+                        print(f"[TRELLIS2] Solidifying mesh: {obj.name} before decimation/retopology...")
+                        solid_mesh = _make_solid_mesh_object(obj)
+                        old_mesh = obj.data
+                        obj.data = solid_mesh
+                        bpy.data.meshes.remove(old_mesh)
+                        print(f"[TRELLIS2] Solidified mesh: {obj.name} successfully")
+                    except Exception as e:
+                        print(f"[TRELLIS2] Error solidifying mesh {obj.name}: {e}")
+
+            # --- Local Decimation & Retopology ---
+            decimate_method = getattr(context.scene, 'trellis2_decimate_method', 'server')
+
+            remesh_method = getattr(context.scene, 'trellis2_remesh_method', 'qdc')
+            
+            imported_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+            if imported_meshes:
+                # 1. Fallback decimation on main thread if background decimation was requested but didn't run
+                if decimate_method == 'collapse' and not getattr(self, '_trimesh_decimated', False):
+                    import trimesh
+                    import numpy as np
+                    import bmesh
+                    
+                    target_faces = context.scene.trellis2_decimation
+                    for obj in imported_meshes:
+                        mesh = obj.data
+                        vertices = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
+                        mesh.vertices.foreach_get("co", vertices)
+                        vertices = vertices.reshape((-1, 3))
+                        
+                        bm = bmesh.new()
+                        bm.from_mesh(mesh)
+                        bmesh.ops.triangulate(bm, faces=bm.faces)
+                        
+                        faces = np.empty(len(bm.faces) * 3, dtype=np.int32)
+                        for i, face in enumerate(bm.faces):
+                            faces[i*3 : (i+1)*3] = [v.index for v in face.verts]
+                        bm.free()
+                        
+                        t_mesh = trimesh.Trimesh(vertices=vertices, faces=faces.reshape((-1, 3)))
+                        if len(t_mesh.faces) > target_faces:
+                            print(f"[TRELLIS2] Main thread fallback trimesh decimation: {len(t_mesh.faces)} -> {target_faces}")
+                            decimated = t_mesh.simplify_quadric_decimation(face_count=target_faces)
+                            mesh.clear_geometry()
+                            mesh.from_pydata(decimated.vertices, [], decimated.faces.tolist())
+                            mesh.update()
+                
+                # 2. Local remeshing retopology
+                if remesh_method == 'quadriflow':
+                    self._perform_retopology(context, imported_meshes, remesh_method)
 
             # --- Apply shading mode to imported meshes ---
             _shade_mode = getattr(context.scene, 'trellis2_shade_mode', 'flat')
             if _shade_mode == 'smooth':
                 bpy.ops.object.shade_smooth()
+            elif _shade_mode == 'flat':
+                bpy.ops.object.shade_flat()
             elif _shade_mode == 'auto_smooth':
-                bpy.ops.object.shade_auto_smooth()
+                if hasattr(bpy.ops.object, "shade_auto_smooth"):
+                    bpy.ops.object.shade_auto_smooth()
+                else:
+                    bpy.ops.object.shade_smooth()
 
             # --- Optional studio lighting for native PBR textures ---
             tex_mode = getattr(self, '_texture_mode', 'native')
@@ -492,6 +590,20 @@ class Trellis2Generate(bpy.types.Operator):
         """Create a three-point studio lighting setup around the imported mesh."""
         return setup_studio_lighting(context, scale=import_scale)
 
+    def _perform_retopology(self, context, meshes, remesh_method):
+        """Perform high-quality local retopology on imported meshes.
+
+        Applies shrinkwrap projection to recover fine details from the high-poly source mesh.
+        """
+        def progress_cb(pct, status_text):
+            self._overall_stage = "Local Processing"
+            self._phase_stage = status_text
+            self._phase_progress = pct
+            self._current_phase = self._total_phases
+            self._update_overall()
+            
+        perform_local_retopology(context, meshes, remesh_method, progress_cb=progress_cb)
+
     def _schedule_texture_generation(self, context):
         """Defer texture generation via a timer so Blender can digest the new cameras.
 
@@ -586,7 +698,46 @@ class Trellis2Generate(bpy.types.Operator):
         bpy.app.timers.register(_deferred_generate, first_interval=0.5)
         bpy.app.timers.register(_pipeline_watcher, first_interval=2.0)
 
-    def _run_trellis2(self, context, image_path, gen_from, revision_dir):
+    def _run_trimesh_decimation(self, glb_bytes, target_faces):
+        """Runs the trimesh decimation directly inside Blender's python (on the background thread)."""
+        import io
+        import trimesh
+        
+        try:
+            print(f"[TRELLIS2] Starting trimesh decimation in Blender's python (target: {target_faces} faces)...")
+            # Load glb from bytes using an in-memory file-like object
+            glb_file = io.BytesIO(glb_bytes)
+            scene = trimesh.load(glb_file, file_type='glb')
+            
+            if scene.is_empty:
+                print("[TRELLIS2] Scene is empty")
+                return None
+                
+            simplified_any = False
+            for name, geom in list(scene.geometry.items()):
+                if isinstance(geom, trimesh.Trimesh):
+                    orig_faces = len(geom.faces)
+                    if orig_faces > target_faces:
+                        print(f"[TRELLIS2] Simplifying {name} directly in Blender Python: {orig_faces} -> {target_faces} faces")
+                        scene.geometry[name] = geom.simplify_quadric_decimation(face_count=target_faces)
+                        simplified_any = True
+                    else:
+                        print(f"[TRELLIS2] Skipping {name}: already has {orig_faces} faces (target {target_faces})")
+            
+            if simplified_any:
+                # Export to bytes
+                out_bytes = scene.export(file_type='glb')
+                return out_bytes
+            else:
+                return glb_bytes
+                
+        except Exception as e:
+            print(f"[TRELLIS2] Error during trimesh decimation: {e}")
+            import traceback
+            traceback.print_exc()
+            raise e
+
+    def _run_trellis2(self, context, image_path, gen_from, revision_dir, decimate_method, target_faces):
         """Background thread: runs the TRELLIS.2 pipeline.
 
         If *gen_from* is ``'prompt'`` the method first generates an input
@@ -754,6 +905,22 @@ class Trellis2Generate(bpy.types.Operator):
             if isinstance(result, dict) and "error" in result:
                 self._error = result["error"]
             else:
+                self._trimesh_decimated = False
+                if decimate_method == 'collapse':
+                    self._detail_stage = "Decimating mesh via trimesh"
+                    self._phase_stage = "Trimesh decimation"
+                    self._phase_progress = 90
+                    self._update_overall()
+                    
+                    try:
+                        decimated_bytes = self._run_trimesh_decimation(result, target_faces)
+                        if decimated_bytes:
+                            result = decimated_bytes
+                            self._trimesh_decimated = True
+                            print("[TRELLIS2] Background trimesh decimation completed successfully")
+                    except Exception as dec_err:
+                        print(f"[TRELLIS2] Background trimesh decimation failed: {dec_err}")
+                        # Fallback: result is unmodified raw GLB
                 self._glb_data = result
 
         except Exception as e:
@@ -761,3 +928,302 @@ class Trellis2Generate(bpy.types.Operator):
                 return  # Swallow exceptions caused by cancel-time WS close
             self._error = str(e)
             traceback.print_exc()
+
+
+# ---------------------------------------------------------------------------
+# Standalone Local Post-Processing & Retopology Utilities
+# ---------------------------------------------------------------------------
+
+def perform_local_retopology(context, meshes, remesh_method, progress_cb=None):
+    """Perform high-quality local retopology on meshes.
+    
+    Applies shrinkwrap projection to recover fine details from the high-poly source mesh.
+    """
+    import tempfile
+    import subprocess
+    import math
+    import os
+    import traceback
+    
+    print(f"[StableGen] Starting local retopology solver: remesh={remesh_method}")
+    wm = context.window_manager
+    wm.progress_begin(0, 100)
+    
+    try:
+        for obj_idx, obj in enumerate(meshes):
+            if obj.type != 'MESH':
+                continue
+                
+            def update_progress(pct, status_text):
+                base = (obj_idx / len(meshes)) * 100
+                span = (1 / len(meshes)) * 100
+                overall_pct = base + (pct / 100) * span
+                
+                wm.progress_update(overall_pct)
+                context.workspace.status_text_set(f"StableGen [Local Retopo]: {status_text} ({int(overall_pct)}%)")
+                
+                if progress_cb:
+                    progress_cb(pct, status_text)
+                    
+                # Force Blender to redraw all panels and viewports immediately
+                try:
+                    bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+                except Exception:
+                    pass
+
+            # 1. Duplicate original high-detail mesh as reference for shrinkwrap projection
+            update_progress(10, "Preserving high-detail reference...")
+            high_poly = obj.copy()
+            high_poly.data = obj.data.copy()
+            high_poly.name = f"{obj.name}_HighPoly_Reference"
+            context.collection.objects.link(high_poly)
+            high_poly.hide_set(True) # Hide reference mesh
+
+            # Set active and select the low-poly target mesh
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+
+            # 2. Solver Setup
+            target_faces = context.scene.trellis2_decimation
+            
+
+            def run_quadriflow(faces_count):
+                if faces_count > 30000:
+                    print(f"[StableGen] Capping Quadriflow target faces from {faces_count} to 30000 for stability")
+                    faces_count = 30000
+                print(f"[StableGen] Running native C++ Quadriflow solver (target faces: {faces_count})")
+                res = {'CANCELLED'}
+                try:
+                    res = bpy.ops.object.quadriflow_remesh(
+                        target_faces=faces_count,
+                        use_mesh_symmetry=False,
+                        use_preserve_sharp=False,
+                        use_preserve_boundary=False
+                    )
+                except Exception as q_err:
+                    print(f"[StableGen] Native Quadriflow custom call failed, retrying with simple signature: {q_err}")
+                    res = bpy.ops.object.quadriflow_remesh(target_faces=faces_count)
+                
+                if 'FINISHED' not in res:
+                    raise RuntimeError(f"Quadriflow operator returned non-finished status: {res}")
+
+            def run_solver(faces_count):
+                if remesh_method == 'quadriflow':
+                    run_quadriflow(faces_count)
+
+            # --- Local Remeshing Solver Stage ---
+            update_progress(50, f"Executing {remesh_method} retopology solver...")
+            try:
+                run_solver(target_faces)
+            except Exception as solve_err:
+                print(f"[StableGen] Solver failed directly on mesh: {solve_err}. Attempting high-resolution OpenVDB Voxel Repair healing...")
+                
+                target_bu = getattr(context.scene, 'trellis2_import_scale', 2.0)
+                voxel_size = max(0.002, target_bu / 512.0)
+                print(f"[StableGen] Healing mesh with OpenVDB Voxel Remesh (size: {voxel_size:.4f})")
+                
+                obj.data.remesh_voxel_size = voxel_size
+                res_vr = {'CANCELLED'}
+                try:
+                    res_vr = bpy.ops.object.voxel_remesh()
+                except Exception as remesh_err:
+                    print(f"[StableGen] OpenVDB Voxel Remesh healing failed: {remesh_err}")
+                
+                # Retry solver on the healed mesh
+                print("[StableGen] Retrying solver execution on healed manifold mesh...")
+                try:
+                    run_solver(target_faces)
+                except Exception as retry_err:
+                    print(f"[StableGen] Solver failed even after voxel healing: {retry_err}")
+                    if target_faces > 30000:
+                        stable_target = 20000
+                        print(f"[StableGen] Retrying with a mathematically stable target count of {stable_target} quads...")
+                        try:
+                            run_solver(stable_target)
+                        except Exception as final_err:
+                            print(f"[StableGen] Fatal: Solver failed even at stable target: {final_err}")
+                    else:
+                        print(f"[StableGen] Fatal: Solver execution failed: {retry_err}")
+
+            # 4. Detail Projection back from HighPoly_Reference via temporary SHRINKWRAP modifier
+            update_progress(80, "Projecting high-detail reference back...")
+            print("[StableGen] Snapping quad grid and projecting high-detail reference details back")
+            sw_mod = obj.modifiers.new(name="SG_Shrinkwrap", type='SHRINKWRAP')
+            sw_mod.target = high_poly
+            sw_mod.wrap_method = 'NEAREST_SURFACEPOINT'
+            sw_mod.wrap_mode = 'ON_SURFACE'
+            
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+            try:
+                bpy.ops.object.modifier_apply(modifier=sw_mod.name)
+            except Exception as sw_err:
+                print(f"[StableGen] Warning: Detail projection shrinkwrap application failed: {sw_err}")
+
+            # 5. Clean up HighPoly_Reference duplicate mesh
+            update_progress(95, "Cleaning up reference assets...")
+            bpy.ops.object.select_all(action='DESELECT')
+            high_poly.select_set(True)
+            try:
+                bpy.ops.object.delete()
+                print(f"[StableGen] Retopology completed successfully for object: {obj.name}")
+            except Exception as del_err:
+                print(f"[StableGen] Warning: Could not delete high-poly reference: {del_err}")
+
+            # Reselect the final low-poly mesh
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+            update_progress(100, "Local retopology completed!")
+            
+    finally:
+        wm.progress_end()
+        context.workspace.status_text_set(None)
+
+
+class StableGenLocalPostProcess(bpy.types.Operator):
+    """Run local post-processing (decimation and/or retopology) on the active mesh"""
+    bl_idname = "object.stablegen_local_postprocess"
+    bl_label = "Run Local Post-Processing"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object and context.active_object.type == 'MESH'
+
+    def execute(self, context):
+        scene = context.scene
+        decimate_method = getattr(scene, 'trellis2_decimate_method', 'server')
+        remesh_method = getattr(scene, 'trellis2_remesh_method', 'qdc')
+        solidify = getattr(scene, 'trellis2_solidify', False)
+        
+        # 1. Check if all post-processing options are disabled/none
+        if decimate_method == 'none' and remesh_method == 'none' and not solidify:
+            self.report({'WARNING'}, "No local post-processing is enabled (Decimation, Retopology, and Solidification are all disabled/set to None).")
+            return {'CANCELLED'}
+            
+        # 2. Error if set to server-side post-processing
+        if decimate_method == 'server' or remesh_method == 'qdc':
+            self.report({'ERROR'}, "Server-side processing cannot be run locally. Please select a local decimation/remesh method.")
+            return {'CANCELLED'}
+            
+        obj = context.active_object
+        if not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "No active mesh object.")
+            return {'CANCELLED'}
+            
+        target_faces = scene.trellis2_decimation
+        do_decimate = (decimate_method == 'collapse')
+        
+        print(f"[StableGen] Running manual local post-processing on {obj.name}: decimate={decimate_method}, remesh={remesh_method}, solidify={solidify}, target={target_faces}")
+        
+        # Switch to object mode
+        if obj.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+            
+        # 3. Run solidification locally on the main thread first if enabled
+        if solidify:
+            from ..texturing.print_export import _make_solid_mesh_object
+            try:
+                print(f"[StableGen] Solidifying active mesh: {obj.name}...")
+                solid_mesh = _make_solid_mesh_object(obj)
+                old_mesh = obj.data
+                obj.data = solid_mesh
+                bpy.data.meshes.remove(old_mesh)
+                print(f"[StableGen] Solidification completed for {obj.name}")
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to solidify mesh: {e}")
+                return {'CANCELLED'}
+
+            
+        # If we need local decimation, run it asynchronously
+        if do_decimate:
+            import numpy as np
+            import bmesh
+            
+            print(f"[StableGen] Starting async trimesh decimation for {obj.name}...")
+            
+            # Extract mesh data on main thread
+            mesh = obj.data
+            vertices = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
+            mesh.vertices.foreach_get("co", vertices)
+            vertices = vertices.reshape((-1, 3))
+            
+            bm = bmesh.new()
+            bm.from_mesh(mesh)
+            bmesh.ops.triangulate(bm, faces=bm.faces)
+            
+            faces = np.empty(len(bm.faces) * 3, dtype=np.int32)
+            for i, face in enumerate(bm.faces):
+                faces[i*3 : (i+1)*3] = [v.index for v in face.verts]
+            bm.free()
+            
+            faces = faces.reshape((-1, 3))
+            
+            # Define worker and callback
+            def bg_decimate_work():
+                import trimesh
+                t_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+                orig_faces = len(t_mesh.faces)
+                if orig_faces > target_faces:
+                    decimated = t_mesh.simplify_quadric_decimation(face_count=target_faces)
+                    return {
+                        "vertices": decimated.vertices.tolist(),
+                        "faces": decimated.faces.tolist(),
+                        "success": True
+                    }
+                return {"success": False}
+                
+            def on_decimate_done(result):
+                if not result:
+                    print("[StableGen] Async decimation failed or was aborted.")
+                    return
+                
+                # Check if object still exists
+                if not obj or obj.name not in bpy.context.scene.objects:
+                    print("[StableGen] Active mesh object no longer exists.")
+                    return
+                    
+                if result.get("success"):
+                    mesh = obj.data
+                    mesh.clear_geometry()
+                    mesh.from_pydata(result["vertices"], [], result["faces"])
+                    mesh.update()
+                    print(f"[StableGen] Async decimation written back successfully.")
+                else:
+                    print(f"[StableGen] Mesh already has fewer faces than target. Bypassed decimation.")
+                
+                # Post-decimation stage (retopology)
+                try:
+                    if remesh_method == 'quadriflow':
+                        perform_local_retopology(bpy.context, [obj], remesh_method)
+                    bpy.context.workspace.status_text_set(None)
+                    # Trigger viewport redraw
+                    for area in bpy.context.screen.areas:
+                        if area.type == 'VIEW_3D':
+                            area.tag_redraw()
+                except Exception as post_err:
+                    print(f"[StableGen] Error in post-decimation stage: {post_err}")
+            
+            # Run async decimation
+            from ..core.state import _run_async
+            bpy.context.workspace.status_text_set("StableGen: Decimating mesh in background...")
+            _run_async(bg_decimate_work, on_decimate_done)
+            self.report({'INFO'}, "Trimesh decimation started in the background...")
+            return {'FINISHED'}
+            
+        else:
+            # No background decimation needed, run retopology synchronously on main thread
+            try:
+                if remesh_method == 'quadriflow':
+                    perform_local_retopology(context, [obj], remesh_method)
+                    
+                self.report({'INFO'}, "Local post-processing completed successfully!")
+                return {'FINISHED'}
+            except Exception as e:
+                self.report({'ERROR'}, f"Failed to run local post-processing: {e}")
+                import traceback
+                traceback.print_exc()
+                return {'CANCELLED'}

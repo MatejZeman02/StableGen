@@ -1704,7 +1704,8 @@ prompt_text_trellis2 = """
     "inputs": {
       "model_config": ["2", 0],
       "conditioning": ["4", 0],
-      "shape_result": ["5", 0],
+      "shape_slat": ["5", 1],
+      "subs": ["5", 2],
       "seed": 0,
       "tex_guidance_strength": 7.5,
       "tex_sampling_steps": 12
@@ -1714,17 +1715,47 @@ prompt_text_trellis2 = """
       "title": "Shape to Textured Mesh"
     }
   },
+  "8": {
+    "inputs": {
+      "trimesh": ["5", 0],
+      "remesh": "on",
+      "remesh_band": 1.0,
+      "remove_inner_faces": false,
+      "floater_threshold": 0.001,
+      "target_face_count": 100000,
+      "weld_vertices": true,
+      "weld_digits": 4,
+      "chart_cone_angle": 90.0,
+      "chart_refine_iterations": 0,
+      "chart_global_iterations": 1,
+      "chart_smooth_strength": 1
+    },
+    "class_type": "Trellis2ProcessMesh",
+    "_meta": {
+      "title": "Process Mesh"
+    }
+  },
+  "9": {
+    "inputs": {
+      "trimesh": ["8", 0],
+      "voxelgrid": ["6", 0],
+      "original_mesh": ["5", 0],
+      "texture_size": 4096
+    },
+    "class_type": "Trellis2RasterizePBR",
+    "_meta": {
+      "title": "Rasterize PBR"
+    }
+  },
   "7": {
     "inputs": {
-      "voxelgrid_path": ["6", 1],
-      "decimation_target": 100000,
-      "texture_size": 4096,
-      "remesh": true,
-      "filename_prefix": "trellis2"
+      "trimesh": ["9", 0],
+      "filename_prefix": "trellis2",
+      "file_format": "glb"
     },
-    "class_type": "Trellis2ExportGLB",
+    "class_type": "Trellis2ExportTrimesh",
     "_meta": {
-      "title": "Export GLB"
+      "title": "Export Trimesh"
     }
   }
 }
@@ -1793,7 +1824,7 @@ prompt_text_trellis2_shape_only = """
   },
   "6": {
     "inputs": {
-      "trimesh": ["5", 1],
+      "trimesh": ["5", 0],
       "target_face_count": 100000,
       "fill_holes": false,
       "remesh": false,

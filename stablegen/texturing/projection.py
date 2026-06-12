@@ -1287,7 +1287,8 @@ def project_image(context, to_project, mat_id, stop_index=1000000):
             _bake_visibility_weights(context, to_project, cameras, mat_id)
 
     # Switch to Cycles (needed for Raycast shader node on all versions)
-    context.scene.render.engine = 'CYCLES'
+    if context.scene.render.engine != 'CYCLES':
+        context.scene.render.engine = 'CYCLES'
     # Force CPU + OSL only for Blender < 5.1 (native Raycast nodes don't need it)
     if bpy.app.version < (5, 1, 0):
         context.scene.cycles.device = 'CPU'

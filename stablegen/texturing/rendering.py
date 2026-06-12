@@ -215,7 +215,8 @@ def render_edge_feather_mask(context, to_export, camera, camera_index, feather_w
         world.use_nodes = False
 
     # ── Render settings ─────────────────────────────────────────────────────
-    context.scene.render.engine = 'CYCLES'
+    if context.scene.render.engine != 'CYCLES':
+        context.scene.render.engine = 'CYCLES'
     context.scene.render.film_transparent = False
     context.scene.cycles.samples = 1
     bpy.context.scene.display_settings.display_device = 'sRGB'
@@ -276,7 +277,8 @@ def render_edge_feather_mask(context, to_export, camera, camera_index, feather_w
 
     # ── Restore render / world settings ─────────────────────────────────────
     context.scene.camera = original_camera
-    context.scene.render.engine = original_engine
+    if context.scene.render.engine != original_engine:
+        context.scene.render.engine = original_engine
     context.scene.render.film_transparent = original_transparent
     context.scene.cycles.samples = original_samples
     bpy.context.scene.view_settings.view_transform = original_view_transform
@@ -726,7 +728,8 @@ def export_emit_image(context, to_export, camera_id=None, bg_color=(0.5, 0.5, 0.
             world.use_nodes = False
 
         # Switch to CYCLES render engine (needed for emission pass rendering)
-        context.scene.render.engine = 'CYCLES'
+        if context.scene.render.engine != 'CYCLES':
+            context.scene.render.engine = 'CYCLES'
         # Force CPU + OSL only for Blender < 5.1 (native Raycast nodes don't need it)
         if bpy.app.version < (5, 1, 0):
             if hasattr(context.scene.cycles, 'shading_system'):
@@ -810,7 +813,8 @@ def export_emit_image(context, to_export, camera_id=None, bg_color=(0.5, 0.5, 0.
                     cv2.imwrite(final_path, expanded_mask_u8)
 
         # Restore original settings
-        context.scene.render.engine = original_engine
+        if context.scene.render.engine != original_engine:
+            context.scene.render.engine = original_engine
         context.scene.render.film_transparent = original_film_transparent
         context.scene.render.use_compositing = original_use_compositing
         context.scene.render.filepath = original_filepath
@@ -907,7 +911,8 @@ def export_render(context, camera_id=None, output_dir=None, filename=None):
     original_use_compositing = context.scene.render.use_compositing
 
     # Switch to WORKBENCH render engine and configure settings
-    context.scene.render.engine = 'BLENDER_WORKBENCH'
+    if context.scene.render.engine != 'BLENDER_WORKBENCH':
+        context.scene.render.engine = 'BLENDER_WORKBENCH'
     # Configure Workbench for a flat, consistent look if needed
     context.scene.display.shading.light = 'STUDIO'
     context.scene.display.shading.color_type = 'SINGLE'
@@ -955,7 +960,8 @@ def export_render(context, camera_id=None, output_dir=None, filename=None):
 
 
     # Restore original render settings
-    context.scene.render.engine = original_engine
+    if context.scene.render.engine != original_engine:
+        context.scene.render.engine = original_engine
     context.scene.display.shading.light = original_workbench_settings['lighting']
     context.scene.display.shading.color_type = original_workbench_settings['color_type']
     context.scene.render.filepath = original_render_filepath
@@ -992,7 +998,8 @@ def export_viewport(context, camera_id=None, output_dir=None, filename=None):
     original_image_settings = context.scene.render.image_settings.file_format
 
     # Switch to WORKBENCH render engine for consistent viewport shading
-    context.scene.render.engine = 'BLENDER_WORKBENCH'
+    if context.scene.render.engine != 'BLENDER_WORKBENCH':
+        context.scene.render.engine = 'BLENDER_WORKBENCH'
 
     # Find a viewport
     viewport_area = None
@@ -1018,7 +1025,8 @@ def export_viewport(context, camera_id=None, output_dir=None, filename=None):
 
     if not (viewport_area and viewport_region and viewport_space and viewport_region_3d and viewport_window):
         print("[StableGen] Viewport render failed: no VIEW_3D area found.")
-        context.scene.render.engine = original_engine
+        if context.scene.render.engine != original_engine:
+            context.scene.render.engine = original_engine
         return
 
     # Store viewport settings
@@ -1053,7 +1061,8 @@ def export_viewport(context, camera_id=None, output_dir=None, filename=None):
     viewport_space.overlay.show_overlays = original_overlay_show
 
     # Restore original render settings
-    context.scene.render.engine = original_engine
+    if context.scene.render.engine != original_engine:
+        context.scene.render.engine = original_engine
     context.scene.render.filepath = original_render_filepath
     context.scene.render.image_settings.file_format = original_image_settings
 
@@ -1522,7 +1531,8 @@ class SwitchMaterial(bpy.types.Operator):
         return {'FINISHED'}
     
 def prepare_baking(context):
-    bpy.context.scene.render.engine = 'CYCLES'
+    if bpy.context.scene.render.engine != 'CYCLES':
+        bpy.context.scene.render.engine = 'CYCLES'
     # Force CPU + OSL only for Blender < 5.1 (native Raycast nodes don't need it)
     if bpy.app.version < (5, 1, 0):
         if hasattr(bpy.context.scene.cycles, 'shading_system'):
@@ -1915,6 +1925,48 @@ def _find_pbr_bake_sources(mat):
     return sources
 
 
+def _has_pbr_channels(mat):
+    """Check if the material contains any PBR channels other than base_color,
+    and that a Principled BSDF is actually active/wired to the material output.
+    """
+    if not mat or not mat.use_nodes:
+        return False
+
+    nodes = mat.node_tree.nodes
+    output_node = None
+    for n in nodes:
+        if n.type == 'OUTPUT_MATERIAL':
+            output_node = n
+            break
+
+    if not output_node or not output_node.inputs["Surface"].links:
+        return False
+
+    # Check if a node is (or leads to) an active Principled BSDF
+    def check_is_pbr_active(node, visited=None):
+        if visited is None:
+            visited = set()
+        if node in visited:
+            return False
+        visited.add(node)
+
+        if node.type == 'BSDF_PRINCIPLED':
+            return True
+        if node.type == 'MIX_SHADER':
+            for inp in node.inputs:
+                if inp.links:
+                    if check_is_pbr_active(inp.links[0].from_node, visited):
+                        return True
+        return False
+
+    from_node = output_node.inputs["Surface"].links[0].from_node
+    if not check_is_pbr_active(from_node):
+        return False
+
+    sources = _find_pbr_bake_sources(mat)
+    return any(ch in sources for ch in ('roughness', 'metallic', 'normal', 'emission', 'height', 'ao'))
+
+
 def _restore_materials(obj, original_materials, original_active):
     """Restore an object's material slots back to their original state."""
     obj.data.materials.clear()
@@ -2148,6 +2200,20 @@ class BakeTextures(bpy.types.Operator):
         max=8192
     ) # type: ignore
 
+    samples: bpy.props.IntProperty(
+        name="Render Samples",
+        description="Number of samples to use for baking. Higher values reduce noise but take longer",
+        default=16,
+        min=1,
+        max=4096
+    ) # type: ignore
+
+    use_denoise: bpy.props.BoolProperty(
+        name="Denoise Baked Textures",
+        description="Use Cycles' built-in denoiser to clean up noise in baked textures",
+        default=True
+    ) # type: ignore
+
     try_unwrap: bpy.props.EnumProperty(
         name="Unwrap Method",
         description="Method to unwrap UVs before baking",
@@ -2235,6 +2301,8 @@ class BakeTextures(bpy.types.Operator):
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "texture_resolution")
+        layout.prop(self, "samples")
+        layout.prop(self, "use_denoise")
         layout.prop(self, "try_unwrap")
         layout.prop(self, "overlap_only")
         layout.prop(self, "add_material")
@@ -2272,11 +2340,18 @@ class BakeTextures(bpy.types.Operator):
         """
 
         self.original_engine = bpy.context.scene.render.engine
-        self.original_shading = bpy.context.space_data.shading.type
+        if bpy.context.space_data and hasattr(bpy.context.space_data, 'shading'):
+            self.original_shading = bpy.context.space_data.shading.type
+        else:
+            self.original_shading = 'SOLID'
         self.original_device = bpy.context.scene.cycles.device
         self.original_samples = bpy.context.scene.cycles.samples
         self.original_max_bounces = bpy.context.scene.cycles.max_bounces
         self.original_persistent = bpy.context.scene.render.use_persistent_data
+        if hasattr(bpy.context.scene.cycles, 'use_denoising'):
+            self.original_use_denoising = bpy.context.scene.cycles.use_denoising
+        else:
+            self.original_use_denoising = False
         # Save Cycles compute_device_type so we can restore after GPU bake
         try:
             self._original_compute_device_type = (
@@ -2285,17 +2360,22 @@ class BakeTextures(bpy.types.Operator):
         except Exception:
             self._original_compute_device_type = None
         # Set render engine to CYCLES (required for baking)
-        bpy.context.scene.render.engine = 'CYCLES'
-        # Switch to Solid shading to avoid conflicts with Rendered mode
-        # (Rendered viewport + bake = crash).  Solid is engine-independent
+        if bpy.context.scene.render.engine != 'CYCLES':
+            bpy.context.scene.render.engine = 'CYCLES'
+        # Switch to Solid shading in ALL viewports to avoid conflicts with Rendered mode
+        # (Rendered viewport + bake = crash). Solid is engine-independent
         # and won't cause pink textures like Material Preview (EEVEE) does.
-        for area in context.screen.areas:
-            if area.type == 'VIEW_3D':
-                for space in area.spaces:
-                    if space.type == 'VIEW_3D':
-                        space.shading.type = 'SOLID'
-                        break
+        for window in context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    for space in area.spaces:
+                        if space.type == 'VIEW_3D':
+                            space.shading.type = 'SOLID'
         prepare_baking(context)
+        # Apply user's custom bake samples and denoising configuration
+        bpy.context.scene.cycles.samples = self.samples
+        if hasattr(bpy.context.scene.cycles, 'use_denoising'):
+            bpy.context.scene.cycles.use_denoising = self.use_denoise
 
         # Start modal operation
         context.window_manager.modal_handler_add(self)
@@ -2368,7 +2448,12 @@ class BakeTextures(bpy.types.Operator):
 
                     self._progress = 100
                 elif self._phase == 'bake':
-                    if self.bake_pbr:
+                    # Fall back to standard color/diffuse bake if PBR channels are absent
+                    has_pbr = False
+                    if self.bake_pbr and obj.active_material:
+                        has_pbr = _has_pbr_channels(obj.active_material)
+
+                    if has_pbr:
                         # PBR mode bakes BaseColor via EMIT — skip the
                         # redundant DIFFUSE bake entirely.
                         self._progress = 100
@@ -2380,6 +2465,19 @@ class BakeTextures(bpy.types.Operator):
                             self.report({'ERROR'}, f"Failed to bake texture for {obj.name}. No materials found.")
                             context.window_manager.event_timer_remove(self._timer)
                             return {'CANCELLED'}
+
+                        # Copy fallback diffuse bake to PBR BaseColor if bake_pbr is True
+                        if self.bake_pbr:
+                            baked_dir = get_dir_path(context, "baked")
+                            src_path = os.path.join(baked_dir, f"{obj.name}.png")
+                            dst_path = os.path.join(baked_dir, f"{obj.name}_BaseColor.png")
+                            if os.path.exists(src_path):
+                                import shutil
+                                try:
+                                    shutil.copy(src_path, dst_path)
+                                    print(f"[StableGen] Copied fallback diffuse bake to PBR BaseColor: {dst_path}")
+                                except Exception as e:
+                                    print(f"[StableGen] Failed to copy fallback diffuse bake to PBR BaseColor: {e}")
 
                         # NEW: optionally flatten into the projection material so you can keep refining
                         if self.flatten_for_refine:
@@ -2417,7 +2515,7 @@ class BakeTextures(bpy.types.Operator):
                         self._phase = 'bake_pbr'
                         self._pbr_queue = []
                         for obj in self._objects:
-                            if obj.active_material:
+                            if obj.active_material and _has_pbr_channels(obj.active_material):
                                 for ch in _find_pbr_bake_sources(obj.active_material):
                                     self._pbr_queue.append((obj, ch))
                         self._pbr_queue_idx = 0
@@ -2436,28 +2534,66 @@ class BakeTextures(bpy.types.Operator):
                     self._current_index = 0
                 else:
                     context.window_manager.event_timer_remove(self._timer)
-                    bpy.context.scene.render.engine = self.original_engine
-                    bpy.context.scene.cycles.device = self.original_device
-                    bpy.context.scene.cycles.samples = self.original_samples
-                    bpy.context.scene.cycles.max_bounces = self.original_max_bounces
-                    bpy.context.scene.render.use_persistent_data = self.original_persistent
-                    # Restore Cycles compute_device_type
-                    if self._original_compute_device_type is not None:
+                    
+                    # Capture original settings in local variables to avoid closures referencing self,
+                    # as self (the operator instance) may be destroyed by Blender when modal exits.
+                    orig_engine = str(self.original_engine)
+                    orig_device = str(self.original_device)
+                    orig_samples = int(self.original_samples)
+                    orig_max_bounces = int(self.original_max_bounces)
+                    orig_persistent = bool(self.original_persistent)
+                    orig_use_denoising = bool(self.original_use_denoising)
+                    orig_compute_device = self._original_compute_device_type
+                    if orig_compute_device is not None:
+                        orig_compute_device = str(orig_compute_device)
+                    orig_shading = str(self.original_shading)
+                    
+                    # Define defer restore function to run outside modal loop
+                    def defer_restore():
                         try:
-                            bpy.context.preferences.addons['cycles'].preferences.compute_device_type = (
-                                self._original_compute_device_type
-                            )
-                        except Exception:
-                            pass
-                    # Restore original viewport shading
-                    for area in context.screen.areas:
-                        if area.type == 'VIEW_3D':
-                            for space in area.spaces:
-                                if space.type == 'VIEW_3D':
-                                    space.shading.type = self.original_shading
-                                    break
+                            # 1. Disable Cycles persistent data to release caches
+                            bpy.context.scene.render.use_persistent_data = False
+                            
+                            # 2. Switch Cycles to CPU device to free GPU contexts and memory
+                            bpy.context.scene.cycles.device = 'CPU'
+                            
+                            # 3. Update view layer to ensure Cycles releases everything
+                            bpy.context.view_layer.update()
+                            
+                            # 4. Now restore the render engine
+                            if bpy.context.scene.render.engine != orig_engine:
+                                bpy.context.scene.render.engine = orig_engine
+                            
+                            # 5. Restore other scene/Cycles settings
+                            bpy.context.scene.cycles.device = orig_device
+                            bpy.context.scene.cycles.samples = orig_samples
+                            bpy.context.scene.cycles.max_bounces = orig_max_bounces
+                            bpy.context.scene.render.use_persistent_data = orig_persistent
+                            if hasattr(bpy.context.scene.cycles, 'use_denoising'):
+                                bpy.context.scene.cycles.use_denoising = orig_use_denoising
+                            if orig_compute_device is not None:
+                                try:
+                                    bpy.context.preferences.addons['cycles'].preferences.compute_device_type = orig_compute_device
+                                except Exception:
+                                    pass
+                            
+                            # 6. Restore original viewport shading in all screens
+                            for window in bpy.context.window_manager.windows:
+                                for area in window.screen.areas:
+                                    if area.type == 'VIEW_3D':
+                                        for space in area.spaces:
+                                            if space.type == 'VIEW_3D':
+                                                space.shading.type = orig_shading
+                                                break
+                            remove_empty_dirs(bpy.context)
+                        except Exception as e:
+                            print(f"[StableGen] Error in defer_restore: {e}")
+                        return None
+                    
+                    import bpy
+                    bpy.app.timers.register(defer_restore, first_interval=0.2)
+                    
                     self.report({'INFO'}, "Textures baked successfully.")
-                    remove_empty_dirs(context)
                     return {'FINISHED'}
         return {'PASS_THROUGH'}
 
@@ -2479,12 +2615,10 @@ class BakeTextures(bpy.types.Operator):
             nodes.remove(node)
 
         # Assign the new material to all faces
-        obj.active_material_index = len(obj.material_slots) - 1
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_all(action='SELECT')
-        bpy.ops.object.material_slot_assign()
-        bpy.ops.object.mode_set(mode='OBJECT')
+        slot_idx = len(obj.material_slots) - 1
+        obj.active_material_index = slot_idx
+        obj.data.polygons.foreach_set("material_index", [slot_idx] * len(obj.data.polygons))
+        obj.data.update()
 
         # Output node
         output_node = nodes.new("ShaderNodeOutputMaterial")

@@ -5,6 +5,7 @@ import bpy  # pylint: disable=import-error
 import mathutils  # pylint: disable=import-error
 import math
 from ..utils import sg_modal_active
+from ..core import get_addon_prefs
 from .presets import PRESETS, GEN_PARAMETERS
 from . import queue as _queue_mod
 
@@ -531,72 +532,75 @@ class StableGenPanel(bpy.types.Panel):
                  row.operator("stablegen.delete_preset", text="Delete", icon="TRASH")
 
         # --- Scene Queue ---
-        queue_box = layout.box()
-        queue_col = queue_box.column()
-        wm = context.window_manager
-        show_queue = getattr(wm, 'sg_show_queue', False)
-        queue_header = queue_col.row()
-        queue_header.prop(wm, "sg_show_queue",
-                          text=f"Scene Queue ({len(wm.sg_scene_queue)})",
-                          icon="TRIA_DOWN" if show_queue else "TRIA_RIGHT",
-                          emboss=False)
-        if _queue_mod._queue_processing:
-            status_text = "Exporting GIF..." if _queue_mod._queue_phase == 'exporting_gif' else "Processing..."
-            queue_header.label(text=status_text, icon="SORTTIME")
-
-        if show_queue:
-            queue_content = queue_col.box()
-            row = queue_content.row()
-            row.template_list("SG_UL_SceneQueueList", "",
-                              wm, "sg_scene_queue",
-                              wm, "sg_scene_queue_index",
-                              rows=3)
-            col = row.column(align=True)
-            col.operator("stablegen.queue_move_up", text="", icon="TRIA_UP")
-            col.operator("stablegen.queue_move_down", text="", icon="TRIA_DOWN")
-            col.separator()
-            col.operator("stablegen.queue_remove", text="", icon="REMOVE")
-
-            btn_row = queue_content.row(align=True)
-            btn_row.operator("stablegen.queue_add", text="Add Scene", icon="ADD")
-            btn_row.operator("stablegen.queue_open_result", text="Open", icon="FILE_BLEND")
-            btn_row2 = queue_content.row(align=True)
-            btn_row2.operator("stablegen.queue_invalidate", text="Reset", icon="LOOP_BACK")
-            btn_row2.operator("stablegen.queue_clear", text="Clear", icon="TRASH")
-
-            process_row = queue_content.row()
+        from ..core import get_addon_prefs
+        prefs = get_addon_prefs(context)
+        if prefs and getattr(prefs, "enable_scene_queue", False):
+            queue_box = layout.box()
+            queue_col = queue_box.column()
+            wm = context.window_manager
+            show_queue = getattr(wm, 'sg_show_queue', False)
+            queue_header = queue_col.row()
+            queue_header.prop(wm, "sg_show_queue",
+                              text=f"Scene Queue ({len(wm.sg_scene_queue)})",
+                              icon="TRIA_DOWN" if show_queue else "TRIA_RIGHT",
+                              emboss=False)
             if _queue_mod._queue_processing:
-                process_row.alert = True
-                process_row.operator("stablegen.queue_process", text="Cancel Queue", icon="CANCEL")
-            else:
-                process_row.operator("stablegen.queue_process", text="Process Queue", icon="PLAY")
-                process_row.enabled = len(wm.sg_scene_queue) > 0
+                status_text = "Exporting GIF..." if _queue_mod._queue_phase == 'exporting_gif' else "Processing..."
+                queue_header.label(text=status_text, icon="SORTTIME")
 
-            # ── GIF Export settings ──
-            gif_box = queue_content.box()
-            gif_row = gif_box.row()
-            gif_row.prop(wm, "sg_queue_gif_export", text="Export Orbit GIF/MP4")
-            if getattr(wm, 'sg_queue_gif_export', False):
-                gif_col = gif_box.column(align=True)
-                row = gif_col.row(align=True)
-                row.prop(wm, "sg_queue_gif_duration")
-                row.prop(wm, "sg_queue_gif_fps")
-                row = gif_col.row(align=True)
-                row.prop(wm, "sg_queue_gif_resolution")
-                row.prop(wm, "sg_queue_gif_samples")
-                gif_col.prop(wm, "sg_queue_gif_engine")
-                gif_col.prop(wm, "sg_queue_gif_interpolation")
-                gif_col.separator()
-                gif_col.prop(wm, "sg_queue_gif_use_hdri")
-                if getattr(wm, 'sg_queue_gif_use_hdri', False):
-                    gif_col.prop(wm, "sg_queue_gif_hdri_path")
-                    gif_col.prop(wm, "sg_queue_gif_hdri_strength")
-                    gif_col.prop(wm, "sg_queue_gif_hdri_rotation")
-                    gif_col.prop(wm, "sg_queue_gif_env_mode")
-                gif_col.prop(wm, "sg_queue_gif_denoiser")
-                if bpy.app.version >= (5, 1, 0) and getattr(wm, 'sg_queue_gif_engine', 'CYCLES') == 'CYCLES':
-                    gif_col.prop(wm, "sg_queue_gif_use_gpu")
-                gif_col.prop(wm, "sg_queue_gif_also_no_pbr")
+            if show_queue:
+                queue_content = queue_col.box()
+                row = queue_content.row()
+                row.template_list("SG_UL_SceneQueueList", "",
+                                  wm, "sg_scene_queue",
+                                  wm, "sg_scene_queue_index",
+                                  rows=3)
+                col = row.column(align=True)
+                col.operator("stablegen.queue_move_up", text="", icon="TRIA_UP")
+                col.operator("stablegen.queue_move_down", text="", icon="TRIA_DOWN")
+                col.separator()
+                col.operator("stablegen.queue_remove", text="", icon="REMOVE")
+
+                btn_row = queue_content.row(align=True)
+                btn_row.operator("stablegen.queue_add", text="Add Scene", icon="ADD")
+                btn_row.operator("stablegen.queue_open_result", text="Open", icon="FILE_BLEND")
+                btn_row2 = queue_content.row(align=True)
+                btn_row2.operator("stablegen.queue_invalidate", text="Reset", icon="LOOP_BACK")
+                btn_row2.operator("stablegen.queue_clear", text="Clear", icon="TRASH")
+
+                process_row = queue_content.row()
+                if _queue_mod._queue_processing:
+                    process_row.alert = True
+                    process_row.operator("stablegen.queue_process", text="Cancel Queue", icon="CANCEL")
+                else:
+                    process_row.operator("stablegen.queue_process", text="Process Queue", icon="PLAY")
+                    process_row.enabled = len(wm.sg_scene_queue) > 0
+
+                # ── GIF Export settings ──
+                gif_box = queue_content.box()
+                gif_row = gif_box.row()
+                gif_row.prop(wm, "sg_queue_gif_export", text="Export Orbit GIF/MP4")
+                if getattr(wm, 'sg_queue_gif_export', False):
+                    gif_col = gif_box.column(align=True)
+                    row = gif_col.row(align=True)
+                    row.prop(wm, "sg_queue_gif_duration")
+                    row.prop(wm, "sg_queue_gif_fps")
+                    row = gif_col.row(align=True)
+                    row.prop(wm, "sg_queue_gif_resolution")
+                    row.prop(wm, "sg_queue_gif_samples")
+                    gif_col.prop(wm, "sg_queue_gif_engine")
+                    gif_col.prop(wm, "sg_queue_gif_interpolation")
+                    gif_col.separator()
+                    gif_col.prop(wm, "sg_queue_gif_use_hdri")
+                    if getattr(wm, 'sg_queue_gif_use_hdri', False):
+                        gif_col.prop(wm, "sg_queue_gif_hdri_path")
+                        gif_col.prop(wm, "sg_queue_gif_hdri_strength")
+                        gif_col.prop(wm, "sg_queue_gif_hdri_rotation")
+                        gif_col.prop(wm, "sg_queue_gif_env_mode")
+                    gif_col.prop(wm, "sg_queue_gif_denoiser")
+                    if bpy.app.version >= (5, 1, 0) and getattr(wm, 'sg_queue_gif_engine', 'CYCLES') == 'CYCLES':
+                        gif_col.prop(wm, "sg_queue_gif_use_gpu")
+                    gif_col.prop(wm, "sg_queue_gif_also_no_pbr")
 
         # --- Main Parameters section ---
         if not hasattr(scene, 'show_generation_params'): 
@@ -810,10 +814,35 @@ class StableGenPanel(bpy.types.Panel):
                     row.prop(scene, "trellis2_post_processing_enabled", text="Enable Post-Processing", toggle=True, icon="MOD_DECIM")
 
                     if scene.trellis2_post_processing_enabled:
+                        dec_method = getattr(scene, 'trellis2_decimate_method', 'server')
+                        rem_method = getattr(scene, 'trellis2_remesh_method', 'qdc')
+                        
                         row = content_box.row()
-                        row.prop(scene, "trellis2_decimation", text="Decimation Target")
+                        row.prop(scene, "trellis2_decimate_method", text="Decimation Method")
+                        
+                        show_target = (dec_method in ('server', 'collapse')) or (rem_method in ('qdc', 'quadriflow'))
+                        if show_target:
+                            if dec_method in ('server', 'collapse') and rem_method in ('qdc', 'quadriflow'):
+                                label_text = "Target Face Count"
+                            elif dec_method in ('server', 'collapse'):
+                                label_text = "Decimation Target"
+                            else:
+                                label_text = "Remesh Face Target"
+                                
+                            row = content_box.row()
+                            row.prop(scene, "trellis2_decimation", text=label_text)
+                            
                         row = content_box.row()
-                        row.prop(scene, "trellis2_remesh", text="Remesh", toggle=True, icon="MOD_REMESH")
+                        row.prop(scene, "trellis2_remesh_method", text="Remesh Method")
+                        
+                        if rem_method == 'quadriflow':
+                            row = content_box.row()
+                            row.label(text="Note: Quadriflow is experimental and might produce artifacts.", icon="WARNING")
+
+                        row = content_box.row()
+                        row.prop(scene, "trellis2_solidify", text="Solidify Mesh")
+
+
 
                     content_box.separator()
 
@@ -1926,6 +1955,9 @@ class StableGenPanel(bpy.types.Panel):
 
         row = tools_box.row()
         row.operator("object.stablegen_mirror_reproject", text="Mirror Last Projection", icon="MOD_MIRROR")
+        if width_mode == 'narrow':
+            row = tools_box.row()
+        row.operator("object.stablegen_local_postprocess", text="Run Local Post-Processing", icon="MODIFIER")
 
         # --- Debug Tools ---
         prefs = context.preferences.addons.get(_ADDON_PKG)
@@ -1960,6 +1992,9 @@ class StableGenPanel(bpy.types.Panel):
                 row = debug_box.row()
             op2 = row.operator("stablegen.debug_feather_preview", text="Feather Preview", icon="MOD_SMOOTH")
 
+            row = debug_box.row()
+            row.operator("stablegen.debug_make_solid", text="Debug Make Solid", icon="MOD_REMESH")
+
         # --- Narrow panel hint ---
         if width_mode == 'narrow':
             hint_row = layout.row()
@@ -1967,4 +2002,157 @@ class StableGenPanel(bpy.types.Panel):
             hint_row.label(text="Widen panel for side-by-side layout", icon="INFO")
 
         layout.separator()
+
+
+class StableGenPrintPanel(bpy.types.Panel):
+    """Creates the 3D Printing panel for the StableGen addon."""
+    bl_label = "StableGen 3D Printing"
+    bl_idname = "OBJECT_PT_stablegen_print"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "StableGen Print"
+    bl_context = "objectmode"
+    bl_ui_units_x = 600
+
+    @classmethod
+    def poll(cls, context):
+        prefs = get_addon_prefs(context)
+        return bool(prefs and prefs.enable_print_tab)
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+
+        region = context.region
+        width = region.width
+        width_mode = 'narrow' if width < 420 else 'wide'
+
+        # Check if 3MF export is running
+        export_op = next(
+            (op for win in context.window_manager.windows
+             for op in win.modal_operators
+             if op.bl_idname == 'OBJECT_OT_export_3mf'),
+            None
+        )
+
+        # Check if Preview Slices is running
+        preview_sliced_op = next(
+            (op for win in context.window_manager.windows
+             for op in win.modal_operators
+             if op.bl_idname == 'OBJECT_OT_stablegen_preview_sliced'),
+            None
+        )
+
+        if export_op:
+            # Draw progress bar and cancel button
+            progress_col = layout.column()
+            stage_text = f"{getattr(export_op, '_stage', 'Exporting 3MF')} ({getattr(export_op, '_progress', 0.0):.0f}%)"
+            progress = getattr(export_op, '_progress', 0.0) / 100.0
+            progress_col.progress(text=stage_text, factor=max(0.0, min(progress, 1.0)))
+            progress_col.operator("object.export_3mf_cancel", text="Cancel Export", icon="CANCEL")
+            
+            # Disable inputs for the rest of the panel
+            main_layout = layout.column()
+            main_layout.enabled = False
+        elif preview_sliced_op:
+            # Draw progress bar and cancel button
+            progress_col = layout.column()
+            stage_text = f"{getattr(preview_sliced_op, '_stage', 'Previewing Slices')} ({getattr(preview_sliced_op, '_progress', 0.0):.0f}%)"
+            progress = getattr(preview_sliced_op, '_progress', 0.0) / 100.0
+            progress_col.progress(text=stage_text, factor=max(0.0, min(progress, 1.0)))
+            progress_col.operator("object.stablegen_preview_sliced_cancel", text="Cancel Preview", icon="CANCEL")
+            
+            # Disable inputs for the rest of the panel
+            main_layout = layout.column()
+            main_layout.enabled = False
+        else:
+            main_layout = layout
+
+        box = main_layout.box()
+        row = box.row()
+        row.alignment = 'CENTER'
+        row.label(text="Multi-Color 3D Print Palette", icon="COLOR")
+
+        row = box.row()
+        row.prop(scene, "stablegen_print_preset", text="Preset")
+
+        palette = scene.stablegen_print_palette
+        if len(palette) > 0:
+            for i in range(0, len(palette), 2):
+                row = box.row()
+                
+                # Column 1
+                item1 = palette[i]
+                col1 = row.column()
+                sub_row1 = col1.row(align=True)
+                is_selected1 = (scene.stablegen_print_palette_index == i)
+                icon1 = 'CHECKBOX_HLT' if is_selected1 else 'CHECKBOX_DEHLT'
+                op1 = sub_row1.operator("wm.context_set_int", text="", icon=icon1, emboss=True)
+                op1.data_path = "scene.stablegen_print_palette_index"
+                op1.value = i
+                sub_row1.prop(item1, "color", text="")
+                
+                # Column 2
+                col2 = row.column()
+                if i + 1 < len(palette):
+                    item2 = palette[i+1]
+                    sub_row2 = col2.row(align=True)
+                    is_selected2 = (scene.stablegen_print_palette_index == i + 1)
+                    icon2 = 'CHECKBOX_HLT' if is_selected2 else 'CHECKBOX_DEHLT'
+                    op2 = sub_row2.operator("wm.context_set_int", text="", icon=icon2, emboss=True)
+                    op2.data_path = "scene.stablegen_print_palette_index"
+                    op2.value = i + 1
+                    sub_row2.prop(item2, "color", text="")
+                else:
+                    col2.label(text="")
+        else:
+            box.label(text="No colors in palette. Click 'Add Color' to start.", icon="INFO")
+            
+        row = box.row(align=True)
+        row.operator("stablegen.add_palette_color", text="Add Color", icon="ADD")
+        if len(palette) > 0:
+            row.operator("stablegen.remove_palette_color", text="Remove Selected", icon="REMOVE")
+            
+        row = box.row()
+        row.prop(scene, "stablegen_print_dithered", text="Dithered (Full Spectrum)")
+        
+        if scene.stablegen_print_dithered:
+            row = box.row()
+            row.prop(scene, "stablegen_print_model_height", text="Model Height (mm)")
+            row = box.row()
+            row.prop(scene, "stablegen_print_layer_height", text="Layer Height (mm)")
+            
+        row = box.row()
+        row.prop(scene, "stablegen_print_smoothing", text="Island Cleanup", slider=True)
+            
+        row = box.row()
+        row.prop(scene, "stablegen_print_chroma_threshold", text="Chroma Threshold", slider=True)
+
+        row = box.row()
+        row.prop(scene, "stablegen_print_make_solid", text="Make Solid", icon="MOD_REMESH")
+        if scene.stablegen_print_make_solid:
+            row = box.row()
+            row.prop(scene, "stablegen_print_raycast_count", text="Raycast Angles")
+
+        # Advanced Solver Settings
+        row = box.row()
+        row.prop(scene, "stablegen_print_show_advanced", text="Advanced Solver Settings", icon="TRIA_DOWN" if scene.stablegen_print_show_advanced else "TRIA_RIGHT")
+        if scene.stablegen_print_show_advanced:
+            adv_box = box.box()
+            adv_box.prop(scene, "stablegen_print_solver_formula", text="Model")
+            adv_box.prop(scene, "stablegen_print_solver_init", text="Init Method")
+            adv_box.prop(scene, "stablegen_print_solver_steps", text="Steps")
+            adv_box.prop(scene, "stablegen_print_saturation_penalty", text="Saturation Penalty", slider=True)
+            if scene.stablegen_print_solver_formula == 'KUBELKA_MUNK':
+                adv_box.prop(scene, "stablegen_print_scattering_weight", text="Opaque Scattering")
+
+        row = box.row(align=True)
+        row.operator("object.stablegen_preview_quantization", text="Preview Colors", icon="COLOR")
+        row.operator("object.stablegen_preview_sliced", text="Preview Slices", icon="MOD_DECIM")
+        row.operator("object.stablegen_clear_quantization_preview", text="Clear Preview", icon="X")
+        
+        row = box.row(align=True)
+        row.operator("object.export_stl", text="Export STL", icon="EXPORT")
+        row.operator("object.export_3mf", text="Export 3MF", icon="EXPORT")
+
           

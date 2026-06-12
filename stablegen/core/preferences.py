@@ -84,6 +84,13 @@ class StableGenAddonPreferences(bpy.types.AddonPreferences):
         update=update_parameters
     )  # type: ignore
 
+    enable_print_tab: bpy.props.BoolProperty(
+        name="Enable 3D Print Tab",
+        description="Show 3D Printing Palette and Exporters in a separate Sidebar tab",
+        default=False,
+        update=update_parameters
+    )  # type: ignore
+
     controlnet_mapping_index: bpy.props.IntProperty(
         default=0, name="Active ControlNet Mapping Index"
     )  # type: ignore
@@ -148,6 +155,13 @@ class StableGenAddonPreferences(bpy.types.AddonPreferences):
         default=600.0, min=60.0, max=3600.0, step=100, precision=0,
     )  # type: ignore
 
+    enable_scene_queue: bpy.props.BoolProperty(
+        name="Enable Scene Queue",
+        description="Show the Scene Queue panel in the sidebar",
+        default=False,
+        update=update_parameters
+    )  # type: ignore
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "output_dir")
@@ -156,6 +170,8 @@ class StableGenAddonPreferences(bpy.types.AddonPreferences):
         row.operator("stablegen.check_server_status", text="", icon='FILE_REFRESH')
 
         layout.prop(self, "save_blend_file")
+        layout.prop(self, "enable_print_tab")
+        layout.prop(self, "enable_scene_queue")
 
         layout.separator()
 

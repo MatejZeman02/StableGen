@@ -828,6 +828,248 @@ class SG_OT_DebugRestoreMaterial(bpy.types.Operator):
         return {'FINISHED'}
 
 
+# ═════════════════════════════════════════════════════════════════════════
+# 9. Debug Make Solid
+# ═════════════════════════════════════════════════════════════════════════
+
+class SG_OT_DebugMakeSolid(bpy.types.Operator):
+    """Run the cylinder-based raycast solidification and hole-filling algorithm
+    in-place on the active mesh object.  Requires the 'SG_PrintPreview' color attribute."""
+    bl_idname = "stablegen.debug_make_solid"
+    bl_label = "Debug Make Solid"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    fill_gaps: bpy.props.BoolProperty(
+        name="Fill Gaps",
+        description="Run boundary loop tracing and hole filling",
+        default=True,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        prefs = context.preferences.addons.get(__package__)
+        if not prefs or not prefs.preferences.enable_debug:
+            return False
+        if sg_modal_active(context):
+            return False
+        return context.active_object and context.active_object.type == 'MESH'
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        from .texturing.print_export import (
+            _make_solid_mesh_object,
+            _match_colors_hsv,
+            _smooth_colors_vectorized,
+            linear_to_srgb_numpy,
+            srgb_to_linear_numpy,
+            classify_filaments,
+            decompose_subtractive,
+            solve_color_mixing_numpy,
+        )
+
+        obj = context.active_object
+        if not obj or obj.type != 'MESH':
+            self.report({'ERROR'}, "No active mesh object.")
+            return {'CANCELLED'}
+
+        if not obj.data.color_attributes.get("SG_PrintPreview"):
+            self.report({'ERROR'}, "Make Solid requires the 'SG_PrintPreview' color layer. Run 'Preview Colors' first.")
+            return {'CANCELLED'}
+
+        # Calculate cylinder bounds for visualization using current mesh
+        mesh = obj.data
+        verts_co = np.empty(len(mesh.vertices) * 3, dtype=np.float32)
+        mesh.vertices.foreach_get("co", verts_co)
+        verts_co = verts_co.reshape((-1, 3))
+        
+        xmin, ymin, zmin = verts_co.min(axis=0)
+        xmax, ymax, zmax = verts_co.max(axis=0)
+        
+        cx = (xmin + xmax) * 0.5
+        cy = (ymin + ymax) * 0.5
+        radius = max(xmax - xmin, ymax - ymin) * 0.5 * 1.25
+        z_top = zmax + (zmax - zmin) * 0.25
+        z_bottom = zmin
+        depth = z_top - z_bottom
+        z_center = (z_top + z_bottom) * 0.5
+
+        try:
+            # Delete any existing debug cylinder first
+            existing_cyl = context.scene.objects.get("SG_Debug_Solid_Cylinder")
+            if existing_cyl:
+                bpy.data.objects.remove(existing_cyl, do_unlink=True)
+                
+            # Create cylinder visualization
+            bpy.ops.mesh.primitive_cylinder_add(
+                vertices=32,
+                radius=radius,
+                depth=depth,
+                location=(cx, cy, z_center),
+                end_fill_type='NOTHING'
+            )
+            cyl_obj = context.active_object
+            cyl_obj.name = "SG_Debug_Solid_Cylinder"
+            cyl_obj.display_type = 'WIRE'
+            
+            # Restore selection to the original object
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+
+            solid_mesh = _make_solid_mesh_object(obj, fill_gaps=self.fill_gaps)
+
+            # Replace the mesh of the object
+            old_mesh = obj.data
+            obj.data = solid_mesh
+
+            # Remove the old mesh from memory
+            bpy.data.meshes.remove(old_mesh)
+
+            # ── Re-run the export color pipeline so the viewport shows exactly  ──
+            # ── what filament/color the 3MF exporter will assign to each tri.   ──
+            scene = context.scene
+            palette_rgbs_linear = np.array([item.color for item in scene.stablegen_print_palette], dtype=np.float32)
+            palette_rgbs = [tuple(c) for c in linear_to_srgb_numpy(palette_rgbs_linear)]
+
+            color_layer = solid_mesh.color_attributes.get("SG_PrintPreview")
+            if palette_rgbs and color_layer:
+                solid_mesh.calc_loop_triangles()
+
+                n_loops = len(solid_mesh.loops)
+                loop_colors = np.empty(n_loops * 4, dtype=np.float32)
+                color_layer.data.foreach_get("color", loop_colors)
+                loop_colors = loop_colors.reshape((-1, 4))
+
+                n_tris = len(solid_mesh.loop_triangles)
+                tri_loops = np.empty(n_tris * 3, dtype=np.int32)
+                solid_mesh.loop_triangles.foreach_get("loops", tri_loops)
+                tri_loops = tri_loops.reshape((-1, 3))
+
+                face_colors_rgb = loop_colors[tri_loops].mean(axis=1)[:, :3]
+                if color_layer.data_type == 'BYTE_COLOR':
+                    face_colors_rgb = srgb_to_linear_numpy(face_colors_rgb)
+                
+                # Convert linear face colors to sRGB for matching/mixing
+                face_colors_srgb = linear_to_srgb_numpy(face_colors_rgb)
+
+                is_dithered = getattr(scene, "stablegen_print_dithered", True)
+                if is_dithered:
+                    mode, channel_indices = classify_filaments(palette_rgbs)
+                    if mode == 'solid':
+                        fil_rgbs = np.array(palette_rgbs, dtype=np.float32)
+                        demands = solve_color_mixing_numpy(fil_rgbs, face_colors_srgb)
+                        
+                        # Reconstruct mixed color using the chosen mixing model
+                        model_formula = getattr(scene, "stablegen_print_solver_formula", 'KUBELKA_MUNK')
+                        if model_formula == 'KUBELKA_MUNK':
+                            scat_weight = getattr(scene, "stablegen_print_scattering_weight", 10.0)
+                            fil_val = fil_rgbs.max(axis=1)
+                            fil_min = fil_rgbs.min(axis=1)
+                            fil_sat = np.zeros_like(fil_val)
+                            mask = fil_val > 1e-5
+                            fil_sat[mask] = (fil_val[mask] - fil_min[mask]) / fil_val[mask]
+                            S_fil = 1.0 + scat_weight * (1.0 - fil_sat) * fil_val
+                            S_fil = S_fil[:, None]
+                            R_clip = np.clip(fil_rgbs, 0.001, 0.999)
+                            K_fil = S_fil * ((1.0 - R_clip)**2) / (2.0 * R_clip)
+                            
+                            K_mix = np.dot(demands, K_fil)
+                            S_mix = np.dot(demands, S_fil)
+                            ratio = K_mix / S_mix
+                            mixed_srgb = 1.0 + ratio - np.sqrt(ratio**2 + 2.0 * ratio)
+                        elif model_formula == 'ADDITIVE':
+                            mixed_srgb = np.dot(demands, fil_rgbs)
+                        else:  # SUBTRACTIVE
+                            mixed_srgb = 1.0 - np.dot(demands, 1.0 - fil_rgbs)
+                    else:
+                        mixed_srgb = np.empty_like(face_colors_srgb)
+                        fil_rgbs = np.array([palette_rgbs[idx] for idx in channel_indices], dtype=np.float32)
+                        for i in range(len(face_colors_srgb)):
+                            r, g, b = face_colors_srgb[i] * 255.0
+                            fractions = decompose_subtractive(r, g, b, mode, palette_rgbs, channel_indices)
+                            mixed_srgb[i] = np.clip(1.0 - sum(fractions[j] * (1.0 - fil_rgbs[j]) for j in range(len(fractions))), 0.0, 1.0)
+                    
+                    mapped_colors = srgb_to_linear_numpy(mixed_srgb)
+                else:
+                    # Solid Mode Quantization
+                    palette_arr = np.array(palette_rgbs, dtype=np.float32)
+                    chroma_threshold = getattr(scene, "stablegen_print_chroma_threshold", 0.35)
+                    material_indices = _match_colors_hsv(face_colors_srgb, palette_rgbs, chroma_threshold=chroma_threshold)
+
+                    smoothing_passes = getattr(scene, "stablegen_print_smoothing", 2)
+                    if smoothing_passes > 0:
+                        tri_verts = np.empty(n_tris * 3, dtype=np.int32)
+                        solid_mesh.loop_triangles.foreach_get("vertices", tri_verts)
+                        tri_verts = tri_verts.reshape((-1, 3))
+                        material_indices = _smooth_colors_vectorized(
+                            tri_verts, material_indices + 1,
+                            len(solid_mesh.vertices), len(palette_rgbs),
+                            iterations=smoothing_passes
+                        ) - 1
+
+                    mapped_srgb = palette_arr[material_indices]
+                    mapped_colors = srgb_to_linear_numpy(mapped_srgb)
+
+                # Map quantized colors and write back into SG_PrintPreview
+                if color_layer.data_type != 'FLOAT_COLOR':
+                    solid_mesh.color_attributes.remove(color_layer)
+                    color_layer = solid_mesh.color_attributes.new(
+                        name="SG_PrintPreview",
+                        type='FLOAT_COLOR',
+                        domain='CORNER',
+                    )
+
+                mapped_rgba = np.ones((n_tris, 4), dtype=np.float32)
+                mapped_rgba[:, :3] = mapped_colors
+
+                all_loop_colors = np.ones((n_loops, 4), dtype=np.float32)
+                all_loop_colors[tri_loops[:, 0]] = mapped_rgba
+                all_loop_colors[tri_loops[:, 1]] = mapped_rgba
+                all_loop_colors[tri_loops[:, 2]] = mapped_rgba
+                color_layer.data.foreach_set("color", all_loop_colors.ravel())
+
+                # Switch viewport shading to show the updated color attribute
+                for area in context.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        for space in area.spaces:
+                            if space.type == 'VIEW_3D':
+                                try:
+                                    space.shading.type = 'SOLID'
+                                    space.shading.color_type = 'VERTEX'
+                                    try:
+                                        space.shading.light = 'FLAT'
+                                    except Exception:
+                                        pass
+                                    solid_mesh.color_attributes.active = color_layer
+                                    if hasattr(solid_mesh, "attributes"):
+                                        solid_mesh.attributes.active_color = color_layer
+                                except TypeError:
+                                    try:
+                                        space.shading.type = 'SOLID'
+                                        space.shading.color_type = 'ATTRIBUTE'
+                                        space.shading.attribute_name = "SG_PrintPreview"
+                                        try:
+                                            space.shading.light = 'FLAT'
+                                        except Exception:
+                                            pass
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+
+                print(f"[StableGen Debug] Export color preview: {n_tris} tris, {len(palette_rgbs)} palette colors.")
+
+            self.report({'INFO'}, f"Successfully solidified {obj.name} in-place. Viewport shows export color assignment.")
+            return {'FINISHED'}
+        except Exception as e:
+            self.report({'ERROR'}, f"Solidification failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'CANCELLED'}
+
+
 # ─── Registration list ───────────────────────────────────────────────────
 
 debug_classes = [
@@ -839,4 +1081,5 @@ debug_classes = [
     SG_OT_DebugFeatherPreview,
     SG_OT_DebugUVSeamViz,
     SG_OT_DebugRestoreMaterial,
+    SG_OT_DebugMakeSolid,
 ]

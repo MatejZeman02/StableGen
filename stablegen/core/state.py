@@ -17,6 +17,7 @@ _cached_checkpoint_list = [("NONE_AVAILABLE", "None available", "Fetch models fr
 _cached_lora_list = [("NONE_AVAILABLE", "None available", "Fetch models from server")]
 _cached_checkpoint_architecture = None
 _pending_checkpoint_refresh_architecture = None
+_updating_print_preset = False
 
 
 # ── In-flight refresh counter ─────────────────────────────────────────────

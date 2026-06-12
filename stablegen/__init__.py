@@ -12,7 +12,7 @@ from .ui.presets import (
     ApplyPreset, SavePreset, DeletePreset,
     ResetQwenPrompt, SwitchToMeshGeneration,
 )
-from .ui.panel import StableGenPanel
+from .ui.panel import StableGenPanel, StableGenPrintPanel
 from .ui.queue import (
     SG_UL_SceneQueueList, SceneQueueAdd, SceneQueueRemove, SceneQueueClear,
     SceneQueueMoveUp, SceneQueueMoveDown, SceneQueueOpenResult,
@@ -23,6 +23,12 @@ from .texturing.rendering import (
 )
 from .texturing.orbit_export import ExportOrbitGIF
 from .texturing.game_export import ExportForGameEngine
+from .texturing.print_export import (
+    StableGenPaletteColor, StableGenAddPaletteColor, StableGenRemovePaletteColor,
+    StableGenPreviewQuantization, StableGenClearQuantizationPreview,
+    StableGenPreviewSliced, StableGenPreviewSlicedCancel,
+    ExportSTL, Export3MF, Export3MFCancel,
+)
 from .cameras import (
     AddCameras, ApplyAutoAspect, CloneCamera, MirrorCamera, ToggleCameraLabels,
     CollectCameraPrompts,
@@ -34,7 +40,7 @@ from .utils import AddHDRI, ApplyModifiers, CurvesToMesh
 from .texturing.generator import (
     ComfyUIGenerate, Reproject, Regenerate, MirrorReproject,
 )
-from .mesh_gen.trellis2 import Trellis2Generate
+from .mesh_gen.trellis2 import Trellis2Generate, StableGenLocalPostProcess
 from .mesh_gen.batch import (
     TRELLIS2_OT_BatchSelectFolder, TRELLIS2_OT_BatchGenerate,
     TRELLIS2_OT_BatchCancel, TRELLIS2_OT_BatchClear,
@@ -61,7 +67,7 @@ bl_info = {
     "name": "StableGen",
     "category": "Object",
     "author": "Ondrej Sakala",
-    "version": (0, 3, 0),
+    "version": (0, 3, 1),
     'blender': (4, 2, 0)
 }
 
@@ -78,6 +84,7 @@ classes = [
     ControlNetUnit,
     LoRAUnit,
     SceneQueueItem,
+    StableGenPaletteColor,
     # Preferences
     STABLEGEN_UL_ControlNetMappingList,
     RefreshControlNetMappings,
@@ -96,6 +103,7 @@ classes = [
     Regenerate,
     MirrorReproject,
     Trellis2Generate,
+    StableGenLocalPostProcess,
     TRELLIS2_OT_BatchSelectFolder,
     TRELLIS2_OT_BatchGenerate,
     TRELLIS2_OT_BatchCancel,
@@ -110,6 +118,15 @@ classes = [
     SwitchMaterial,
     ExportOrbitGIF,
     ExportForGameEngine,
+    StableGenAddPaletteColor,
+    StableGenRemovePaletteColor,
+    StableGenPreviewQuantization,
+    StableGenClearQuantizationPreview,
+    StableGenPreviewSliced,
+    StableGenPreviewSlicedCancel,
+    ExportSTL,
+    Export3MF,
+    Export3MFCancel,
     CollectCameraPrompts,
     SG_UL_CameraOrderList,
     SyncCameraOrder,
@@ -139,6 +156,7 @@ classes = [
     SceneQueueProcess,
     # Main panel (must be last – it uses all the above)
     StableGenPanel,
+    StableGenPrintPanel,
 ]
 # Append debug classes (defined in debug_tools.py)
 classes.extend(_debug_classes)

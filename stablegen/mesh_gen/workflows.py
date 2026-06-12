@@ -223,6 +223,8 @@ class _Trellis2WorkflowMixin:
                 'get_conditioning': '4',
                 'image_to_shape': '5',
                 'shape_to_textured_mesh': '6',
+                'process_mesh': '8',
+                'rasterize_pbr': '9',
                 'export_glb': '7',
             }
             export_node_key = 'export_glb'
@@ -248,7 +250,7 @@ class _Trellis2WorkflowMixin:
             prompt[NODES['get_conditioning']]["inputs"]["image"] = [NODES['input_image'], 0]
             prompt[NODES['get_conditioning']]["inputs"]["mask"] = [NODES['input_image'], 1]
         else:
-            prompt[NODES['remove_bg']]["inputs"]["low_vram"] = False
+            prompt[NODES['remove_bg']]["inputs"]["low_vram"] = True
 
         # Configure conditioning
         prompt[NODES['get_conditioning']]["inputs"]["background_color"] = scene.trellis2_background_color
@@ -268,32 +270,56 @@ class _Trellis2WorkflowMixin:
         # When post-processing is disabled, maximize the decimation target
         # and disable remeshing so the user gets the rawest possible mesh.
         use_pp = getattr(scene, 'trellis2_post_processing_enabled', True)
+        decimate_method = getattr(scene, 'trellis2_decimate_method', 'server')
+        remesh_method = getattr(scene, 'trellis2_remesh_method', 'qdc')
 
         if skip_texture:
-            # Configure simplify node
-            if use_pp:
-                prompt[NODES['simplify']]["inputs"]["target_face_count"] = scene.trellis2_decimation
-                prompt[NODES['simplify']]["inputs"]["remesh"] = scene.trellis2_remesh
+            bypass_server_simplify = (not use_pp) or (remesh_method != 'qdc' and decimate_method != 'server')
+            if bypass_server_simplify:
+                # Bypass simplify node entirely: connect export directly to shape generation
+                prompt[NODES['export_trimesh']]["inputs"]["trimesh"] = [NODES['image_to_shape'], 0]
+                # Remove the simplify node from the prompt
+                simplify_id = NODES.get('simplify')
+                if simplify_id and simplify_id in prompt:
+                    del prompt[simplify_id]
             else:
-                # Raw mesh — max faces, no remesh
-                prompt[NODES['simplify']]["inputs"]["target_face_count"] = 5000000
-                prompt[NODES['simplify']]["inputs"]["remesh"] = False
-            prompt[NODES['simplify']]["inputs"]["fill_holes"] = False
+                # Post-processing is enabled and uses server-side QDC or decimation
+                if remesh_method == 'qdc':
+                    # Server QDC handles both decimation and remeshing
+                    prompt[NODES['simplify']]["inputs"]["target_face_count"] = scene.trellis2_decimation
+                    prompt[NODES['simplify']]["inputs"]["remesh"] = True
+                elif decimate_method == 'server':
+                    # Server decimation only (no server remesh)
+                    prompt[NODES['simplify']]["inputs"]["target_face_count"] = scene.trellis2_decimation
+                    prompt[NODES['simplify']]["inputs"]["remesh"] = False
+                prompt[NODES['simplify']]["inputs"]["fill_holes"] = False
             prompt[NODES['export_trimesh']]["inputs"]["filename_prefix"] = unique_prefix
         else:
             # Configure texture generation
             prompt[NODES['shape_to_textured_mesh']]["inputs"]["seed"] = seed
             prompt[NODES['shape_to_textured_mesh']]["inputs"]["tex_guidance_strength"] = scene.trellis2_tex_guidance
             prompt[NODES['shape_to_textured_mesh']]["inputs"]["tex_sampling_steps"] = scene.trellis2_tex_steps
-
-            # Configure GLB export
-            if use_pp:
-                prompt[NODES['export_glb']]["inputs"]["decimation_target"] = scene.trellis2_decimation
-                prompt[NODES['export_glb']]["inputs"]["remesh"] = scene.trellis2_remesh
+ 
+            # Configure GLB export via process/rasterize/export pipeline
+            decimate_method = getattr(scene, 'trellis2_decimate_method', 'server')
+            remesh_method = getattr(scene, 'trellis2_remesh_method', 'qdc')
+            
+            bypass_server_process = (not use_pp) or (remesh_method != 'qdc' and decimate_method != 'server')
+            if bypass_server_process:
+                # Local decimation and/or local remeshing, or post-processing disabled: bypass server process_mesh entirely
+                prompt[NODES['rasterize_pbr']]["inputs"]["trimesh"] = [NODES['image_to_shape'], 0]
+                process_id = NODES.get('process_mesh')
+                if process_id and process_id in prompt:
+                    del prompt[process_id]
             else:
-                prompt[NODES['export_glb']]["inputs"]["decimation_target"] = 5000000
-                prompt[NODES['export_glb']]["inputs"]["remesh"] = False
-            prompt[NODES['export_glb']]["inputs"]["texture_size"] = scene.trellis2_texture_size
+                if remesh_method == 'qdc':
+                    prompt[NODES['process_mesh']]["inputs"]["target_face_count"] = scene.trellis2_decimation
+                    prompt[NODES['process_mesh']]["inputs"]["remesh"] = "on"
+                elif decimate_method == 'server':
+                    prompt[NODES['process_mesh']]["inputs"]["target_face_count"] = scene.trellis2_decimation
+                    prompt[NODES['process_mesh']]["inputs"]["remesh"] = "off"
+            
+            prompt[NODES['rasterize_pbr']]["inputs"]["texture_size"] = scene.trellis2_texture_size
             prompt[NODES['export_glb']]["inputs"]["filename_prefix"] = unique_prefix
 
         # Save prompt for debugging
@@ -331,27 +357,29 @@ class _Trellis2WorkflowMixin:
             # Weights approximate actual time spent per node
             if skip_texture:
                 NODE_PROGRESS = {
-                    NODES['input_image']:        2,
-                    NODES['load_models']:        3,
-                    NODES['get_conditioning']:   25,
-                    NODES['image_to_shape']:     80,
-                    NODES['simplify']:           90,
-                    NODES['export_trimesh']:     98,
+                    NODES['input_image']:        1,
+                    NODES['load_models']:        2,
+                    NODES['get_conditioning']:   8,
+                    NODES['image_to_shape']:     10,
+                    NODES['simplify']:           85,
+                    NODES['export_trimesh']:     95,
                 }
                 if not skip_bg:
-                    NODE_PROGRESS[NODES['remove_bg']] = 12
+                    NODE_PROGRESS[NODES['remove_bg']] = 5
             else:
                 # Full textured pipeline (single submission)
                 NODE_PROGRESS = {
-                    NODES['input_image']:              2,
-                    NODES['load_models']:              3,
-                    NODES['get_conditioning']:         18,
-                    NODES['image_to_shape']:           55,
-                    NODES['shape_to_textured_mesh']:   85,
+                    NODES['input_image']:              1,
+                    NODES['load_models']:              2,
+                    NODES['get_conditioning']:         8,
+                    NODES['image_to_shape']:           10,
+                    NODES['shape_to_textured_mesh']:   50,
+                    NODES['process_mesh']:             85,
+                    NODES['rasterize_pbr']:            92,
                     NODES['export_glb']:               98,
                 }
                 if not skip_bg:
-                    NODE_PROGRESS[NODES['remove_bg']] = 10
+                    NODE_PROGRESS[NODES['remove_bg']] = 5
 
             # Wait for execution to complete via WebSocket
             # Also capture 'executed' events which may contain the output path
@@ -366,6 +394,8 @@ class _Trellis2WorkflowMixin:
                 'get_conditioning':         'Conditioning',
                 'image_to_shape':           'Generating Shape',
                 'shape_to_textured_mesh':   'Generating Texture',
+                'process_mesh':             'Processing Mesh',
+                'rasterize_pbr':            'Rasterizing PBR',
                 'simplify':                 'Simplifying Mesh',
                 'export_trimesh':           'Exporting Mesh',
                 'export_glb':               'Exporting GLB',
@@ -378,12 +408,16 @@ class _Trellis2WorkflowMixin:
             _ss_steps    = scene.trellis2_ss_steps
             _shape_steps = scene.trellis2_shape_steps
             _tex_steps   = getattr(scene, 'trellis2_tex_steps', 0)
+            _resolution  = getattr(scene, 'trellis2_resolution', '1024_cascade')
+            _is_cascade  = _resolution in ('1024_cascade', '1536_cascade')
             _current_exec_node = None  # node-key of the currently executing node
+            _current_exec_node_id = None  # node-id of the currently executing node
 
             # Track accumulated sub-phases within a node so we can
             # compute a node-internal overall progress.
             _sub_phase_idx = 0     # resets when the executing node changes
             _sub_phase_count = 1   # how many sub-phases this node has
+            _prev_p_value = 0      # track previous step value to detect restarts
 
             while True:
                 try:
@@ -427,22 +461,25 @@ class _Trellis2WorkflowMixin:
                                 self.operator._phase_stage = f"TRELLIS.2: {node_label}"
                                 # Update progress based on node weight
                                 if node_id in NODE_PROGRESS:
-                                    self.operator._phase_progress = NODE_PROGRESS[node_id]
+                                    self.operator._phase_progress = max(self.operator._phase_progress, NODE_PROGRESS[node_id])
                                     if hasattr(self.operator, '_update_overall'):
                                         self.operator._update_overall()
                                 self.operator._detail_stage = node_label
                                 self.operator._detail_progress = 0
 
-                                # Reset sub-phase tracking for the new node
-                                _current_exec_node = node_key
-                                _sub_phase_idx = 0
-                                if node_key == 'image_to_shape':
-                                    # SS sampling + shape sampling = 2 sub-phases
-                                    _sub_phase_count = 2
-                                elif node_key == 'shape_to_textured_mesh':
-                                    _sub_phase_count = 1
-                                else:
-                                    _sub_phase_count = 1
+                                # Reset sub-phase tracking for the new node if not already transitioned
+                                if node_id != _current_exec_node_id:
+                                    _current_exec_node = node_key
+                                    _current_exec_node_id = node_id
+                                    _sub_phase_idx = 0
+                                    _prev_p_value = 0
+                                    if node_key == 'image_to_shape':
+                                        # SS sampling + SLat base (+ SLat cascade if cascade resolution)
+                                        _sub_phase_count = 3 if _is_cascade else 2
+                                    elif node_key == 'shape_to_textured_mesh':
+                                        _sub_phase_count = 1
+                                    else:
+                                        _sub_phase_count = 1
 
                     elif message['type'] == 'executed':
                         # Capture output from export node (newer ComfyUI versions)
@@ -473,48 +510,101 @@ class _Trellis2WorkflowMixin:
                         # Within-node progress (sampler steps).
                         # TRELLIS.2 nodes may emit separate runs of progress
                         # events for each internal sampling phase.  We detect
-                        # the sub-phase by matching ``max`` against known step
-                        # counts (SS, shape, texture).
+                        # the sub-phase transition by checking if the progress
+                        # value decreased (restarted), which works even when the
+                        # step counts (max) of different sub-phases are identical.
                         p_data = message['data']
+                        # Only process progress for the currently executing node to prevent
+                        # stray progress events from corrupting our stateful sub-phase tracking.
+                        p_node = p_data.get('node')
+                        # If the progress event is for a new node, transition to it immediately.
+                        # This prevents timing races where the 'executing' event is delayed.
+                        if p_node and p_node != _current_exec_node_id and p_node in NODE_PROGRESS:
+                            _current_exec_node_id = p_node
+                            node_names = {v: k for k, v in NODES.items()}
+                            _current_exec_node = node_names.get(p_node, p_node)
+                            node_label = NODE_LABELS.get(_current_exec_node, _current_exec_node)
+                            print(f"[TRELLIS2] Early transition to node {_current_exec_node} via progress event")
+                            self.operator._phase_stage = f"TRELLIS.2: {node_label}"
+                            self.operator._detail_stage = node_label
+                            self.operator._detail_progress = 0
+
+                            # Reset sub-phase tracking
+                            _sub_phase_idx = 0
+                            _prev_p_value = 0
+                            if _current_exec_node == 'image_to_shape':
+                                _sub_phase_count = 3 if _is_cascade else 2
+                            else:
+                                _sub_phase_count = 1
+
+                        if p_node and p_node != _current_exec_node_id:
+                            continue
+
                         p_value = p_data['value']
                         p_max   = p_data['max']
+
+                        # Filter out any progress updates that do not match the expected sampler steps.
+                        # This eliminates high-level node progress (p_max=3) and stray tiled convolution tqdm progress (e.g. p_max=5 or p_max=37).
+                        if _current_exec_node == 'image_to_shape':
+                            if p_max not in (_ss_steps, _shape_steps):
+                                continue
+                        elif _current_exec_node == 'shape_to_textured_mesh':
+                            if p_max != _tex_steps:
+                                continue
+
                         step_progress = (p_value / p_max) * 100 if p_max else 0
+
+                        # Detect sub-phase transition
+                        if p_value < _prev_p_value:
+                            _sub_phase_idx = min(_sub_phase_idx + 1, _sub_phase_count - 1)
+                            print(f"[TRELLIS2] Sub-phase restart detected. Transitioning to sub-phase index {_sub_phase_idx}")
+                        _prev_p_value = p_value
 
                         # ── Sub-phase identification ──
                         sub_label = ""
                         if _current_exec_node == 'image_to_shape':
-                            if p_max == _ss_steps:
+                            if _sub_phase_idx == 0:
                                 sub_label = "Sampling SS"
-                                # First sub-phase: reset index if we see it again
-                                if _sub_phase_idx == 0 or p_value == 1:
-                                    _sub_phase_idx = 0
-                            elif p_max == _shape_steps:
-                                sub_label = "Sampling Shape SLat"
-                                if _sub_phase_idx < 1:
-                                    _sub_phase_idx = 1
+                            elif _sub_phase_idx == 1:
+                                sub_label = "Sampling Shape SLat LR" if _is_cascade else "Sampling Shape SLat"
                             else:
-                                # Unknown max — show generic label
-                                sub_label = "Sampling"
+                                sub_label = "Sampling Shape SLat HR"
                         elif _current_exec_node == 'shape_to_textured_mesh':
-                            if p_max == _tex_steps:
-                                sub_label = "Sampling Texture"
-                            else:
-                                sub_label = "Sampling"
+                            sub_label = "Sampling Texture"
                         else:
                             sub_label = "Processing"
 
-                        # Compute node-internal overall progress accounting for sub-phases
-                        if _sub_phase_count > 1:
-                            node_overall = ((_sub_phase_idx + step_progress / 100.0)
-                                            / _sub_phase_count) * 100.0
+                        # Compute node-internal overall progress accounting for weighted sub-phases.
+                        # SS sampling is very fast, SLat Base is medium, SLat Cascade is slow.
+                        if _current_exec_node == 'image_to_shape':
+                            sub_weights = [10, 40, 50] if _is_cascade else [15, 85]
                         else:
-                            node_overall = step_progress
+                            sub_weights = [100]
+
+                        idx = min(_sub_phase_idx, len(sub_weights) - 1)
+                        completed_progress = sum(sub_weights[:idx])
+                        current_weight = sub_weights[idx]
+                        node_overall = completed_progress + (step_progress / 100.0) * current_weight
 
                         if step_progress != 0:
-                            self.operator._detail_progress = node_overall
+                            self.operator._detail_progress = step_progress
                             self.operator._detail_stage = (
                                 f"{sub_label}: Step {p_value}/{p_max}"
                             )
+                            # Interpolate the overall phase progress dynamically based on node_overall
+                            if _current_exec_node_id in NODE_PROGRESS:
+                                base_pct = NODE_PROGRESS[_current_exec_node_id]
+                                sorted_pcts = sorted(list(NODE_PROGRESS.values()))
+                                try:
+                                    idx = sorted_pcts.index(base_pct)
+                                    next_pct = sorted_pcts[idx + 1] if idx + 1 < len(sorted_pcts) else 100
+                                except (ValueError, IndexError):
+                                    next_pct = base_pct + 10  # fallback
+                                span = next_pct - base_pct
+                                new_phase_pct = base_pct + (node_overall / 100.0) * span
+                                self.operator._phase_progress = max(self.operator._phase_progress, new_phase_pct)
+                                if hasattr(self.operator, '_update_overall'):
+                                    self.operator._update_overall()
                             print(f"[TRELLIS2] {sub_label}: Step {p_value}/{p_max} ({step_progress:.0f}%)")
 
                     elif message['type'] == 'execution_error':

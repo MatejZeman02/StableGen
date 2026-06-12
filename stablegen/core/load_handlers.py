@@ -18,11 +18,18 @@ def load_handler(dummy):
     """Set default ControlNet/LoRA units and sync checkpoint cache on file load."""
     from ..ui.model_units import get_lora_models
     from . import state as _state
+    from ..texturing.print_export import prepopulate_palette
 
     if not bpy.context.scene:
         return
 
     scene = bpy.context.scene
+
+    # Pre-populate multi-color printing palette
+    try:
+        prepopulate_palette(scene)
+    except Exception as e:
+        print(f"[StableGen] Load Handler: failed to prepopulate palette: {e}")
     addon_prefs = bpy.context.preferences.addons[ADDON_PKG].preferences
 
     # Re-register aspect-ratio crop overlays

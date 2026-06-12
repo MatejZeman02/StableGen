@@ -175,3 +175,17 @@ cython_debug/
 stablegen/feather.oso
 stablegen.zip
 ref/
+
+# StableGen specific ignores
+AGENTS.md
+scratch/
+stablegen/scratch/
+script.py
+sg_wheels/
+stablegen/.claude/
+stablegen/mesh_gen/test_planar.py
+stablegen/texturing/debug_solver_expanded.py
+stablegen/texturing/debug_solver_penalty.py
+t.3mf
+test_output.3mf
+

@@ -15,6 +15,8 @@ from .callbacks import (
     update_trellis2_generate_from,
     update_trellis2_initial_image_arch,
     update_trellis2_texture_mode,
+    update_print_preset,
+    update_print_dithered,
 )
 from . import ADDON_PKG
 
@@ -61,6 +63,103 @@ def register_properties(update_model_list, ControlNetUnit, LoRAUnit,
     )
     bpy.types.WindowManager.sg_show_queue = bpy.props.BoolProperty(
         name="Show Queue", default=False
+    )
+
+    # --- Multi-Color Print Palette (on Scene) ---
+    from ..texturing.print_export import StableGenPaletteColor
+    bpy.types.Scene.stablegen_print_palette = bpy.props.CollectionProperty(
+        type=StableGenPaletteColor, name="Print Palette"
+    )
+    bpy.types.Scene.stablegen_print_palette_index = bpy.props.IntProperty(
+        name="Palette Index", default=0
+    )
+    bpy.types.Scene.stablegen_print_preset = bpy.props.EnumProperty(
+        name="Print Preset",
+        description="Select a multi-color printing preset",
+        items=[
+            ('CUSTOM', 'Custom', 'Use custom palette and settings'),
+            ('CMYW_DITHERED', 'CMYW (Dithered)', 'Dithered mode with Cyan, Magenta, Yellow, White'),
+            ('CMYK_DITHERED', 'CMYK (Dithered)', 'Dithered mode with Cyan, Magenta, Yellow, Black'),
+            ('CMYW_MIXES_SOLID', 'CMYW + Mixes (Non-Dithered)', 'Solid mode with CMYW and all 1:1, 2:1, 1:2 mixtures'),
+            ('CMYK_MIXES_SOLID', 'CMYK + Mixes (Non-Dithered)', 'Solid mode with CMYK and all 1:1, 2:1, 1:2 mixtures'),
+        ],
+        default='CMYW_DITHERED',
+        update=update_print_preset
+    )
+    bpy.types.Scene.stablegen_print_dithered = bpy.props.BoolProperty(
+        name="Dithered (Full Spectrum)",
+        description="Slice and dither layers to blend colors. If disabled, faces are printed as solid colors using the closest filament.",
+        default=True,
+        update=update_print_dithered,
+    )
+    bpy.types.Scene.stablegen_print_layer_height = bpy.props.FloatProperty(
+        name="Layer Height",
+        description="Layer height in mm",
+        default=0.08, min=0.01, max=1.0, step=1, precision=3,
+    )
+    bpy.types.Scene.stablegen_print_model_height = bpy.props.FloatProperty(
+        name="Model Height",
+        description="Target height of the exported model in mm (scaled from Blender dimensions)",
+        default=50.0, min=0.1, max=1000.0, step=10, precision=1,
+    )
+    bpy.types.Scene.stablegen_print_smoothing = bpy.props.IntProperty(
+        name="Smoothing Passes",
+        description="Number of majority-vote island cleanup passes to apply to the quantization",
+        default=2, min=0, max=10
+    )
+    bpy.types.Scene.stablegen_print_chroma_threshold = bpy.props.FloatProperty(
+        name="Chromatic Threshold",
+        description="Saturation above which a colour is treated as chromatic for hue-matching",
+        default=0.35, min=0.0, max=1.0, step=1, precision=2,
+    )
+    bpy.types.Scene.stablegen_print_make_solid = bpy.props.BoolProperty(
+        name="Make Solid",
+        description="Extract outer shell via cylinder-raycast visibility, delete internal geometry, and fill bottom holes. Requires SG_PrintPreview color attribute.",
+        default=False,
+    )
+    bpy.types.Scene.stablegen_print_raycast_count = bpy.props.IntProperty(
+        name="Raycast Angles",
+        description="Number of angular sample directions around the bounding cylinder per height level (5 height levels are tested). Higher values help preserve narrow crevices but increase calculation time",
+        default=12, min=4, max=64,
+    )
+    bpy.types.Scene.stablegen_print_show_advanced = bpy.props.BoolProperty(
+        name="Show Advanced Settings",
+        description="Show advanced solver parameters for custom filament mixing",
+        default=False,
+    )
+    bpy.types.Scene.stablegen_print_solver_init = bpy.props.EnumProperty(
+        name="Initialization Method",
+        description="Select the starting state for the solver optimization loop",
+        items=[
+            ('EQUAL', 'Equal Fractions', 'Initialize all filaments with equal fractions (1/N)'),
+            ('CLOSEST', 'Closest Filament', 'Initialize with 100% of the single closest filament')
+        ],
+        default='CLOSEST',
+    )
+    bpy.types.Scene.stablegen_print_solver_steps = bpy.props.IntProperty(
+        name="Convergence Steps",
+        description="Number of iterations for the Frank-Wolfe optimization loop",
+        default=80, min=10, max=500,
+    )
+    bpy.types.Scene.stablegen_print_solver_formula = bpy.props.EnumProperty(
+        name="Mixing Model",
+        description="Algorithm used to simulate physical filament color mixing",
+        items=[
+            ('ADDITIVE', 'Linear Additive', 'Standard linear additive color mixing'),
+            ('SUBTRACTIVE', 'Linear Subtractive', 'Simple linear complement subtractive color mixing'),
+            ('KUBELKA_MUNK', 'Kubelka-Munk', 'Physical Kubelka-Munk model with absorption and scattering')
+        ],
+        default='KUBELKA_MUNK',
+    )
+    bpy.types.Scene.stablegen_print_scattering_weight = bpy.props.FloatProperty(
+        name="Opaque Scattering",
+        description="Scattering coefficient multiplier for bright/opaque filaments (e.g. Skin, White)",
+        default=10.0, min=1.0, max=50.0,
+    )
+    bpy.types.Scene.stablegen_print_saturation_penalty = bpy.props.FloatProperty(
+        name="Saturation Penalty",
+        description="Penalty weight to prevent mixing desaturated spot colors into saturated target regions. High values force primary colors",
+        default=1.0, min=0.0, max=10.0, precision=2,
     )
 
     # --- Queue GIF Export settings ---
@@ -1215,7 +1314,7 @@ def register_properties(update_model_list, ControlNetUnit, LoRAUnit,
             ('fp16', 'FP16', 'Float16 (most GPUs)'),
             ('fp32', 'FP32', 'Float32 (slowest, most compatible)'),
         ],
-        default='auto', update=update_parameters
+        default='bf16', update=update_parameters
     )
     bpy.types.Scene.trellis2_attn_backend = bpy.props.EnumProperty(
         name="Attention Backend", description="Attention implementation to use",
@@ -1250,7 +1349,7 @@ def register_properties(update_model_list, ControlNetUnit, LoRAUnit,
     )
     bpy.types.Scene.trellis2_tex_guidance = bpy.props.FloatProperty(
         name="Texture Guidance", description="Texture CFG scale. Higher = stronger adherence to input image",
-        default=7.5, min=1.0, max=20.0, step=10, update=update_parameters
+        default=3.0, min=1.0, max=20.0, step=10, update=update_parameters
     )
     bpy.types.Scene.trellis2_tex_steps = bpy.props.IntProperty(
         name="Texture Steps", description="Texture sampling steps. More steps = better quality but slower",
@@ -1260,7 +1359,7 @@ def register_properties(update_model_list, ControlNetUnit, LoRAUnit,
         name="Max Tokens",
         description="Max sparse-voxel tokens during cascade upsampling (only affects cascade modes). "
                     "Higher = more detail but more VRAM. Increase to 49152 for maximum detail if VRAM allows",
-        default=32768, min=16384, max=65536, step=4096, update=update_parameters
+        default=49152, min=16384, max=65536, step=4096, update=update_parameters
     )
     bpy.types.Scene.trellis2_texture_size = bpy.props.IntProperty(
         name="Texture Size",
@@ -1272,15 +1371,51 @@ def register_properties(update_model_list, ControlNetUnit, LoRAUnit,
         name="Decimation Target", description="Target polygon count for mesh simplification. Lower = simpler mesh",
         default=100000, min=1000, max=5000000, step=10000, update=update_parameters
     )
-    bpy.types.Scene.trellis2_remesh = bpy.props.BoolProperty(
-        name="Remesh", description="Apply remeshing for cleaner topology",
-        default=True, update=update_parameters
+    bpy.types.Scene.trellis2_remesh = bpy.props.EnumProperty(
+        name="Remesh/Retopo Method (Legacy)",
+        description="Legacy field - please use Decimation Method and Remesh/Retopo Method instead",
+        items=[
+            ('qdc', "QDC (Server)", ""),
+            ('none', "None (Raw)", ""),
+            ('decimate_collapse', "Collapse Decimate (Local)", ""),
+            ('quadriflow', "Quadriflow (Local) [Experimental]", ""),
+        ],
+        default='qdc',
+        update=update_parameters
+    )
+    bpy.types.Scene.trellis2_decimate_method = bpy.props.EnumProperty(
+        name="Decimation Method",
+        description="Method for decimation: Server-side, Collapse (Local), or None. Note: Server-Side QEM is required/recommended when using QDC (Server) remeshing",
+        items=[
+            ('none', "None (Raw)", "No decimation - keep the high-poly raw details"),
+            ('server', "Server-Side QEM", "Simplify on the ComfyUI server via edge-collapse (required/recommended for Server QDC remeshing)"),
+            ('collapse', "Collapse Decimate (Local)", "Adaptive decimation locally in Blender via QEM solver (best for None or local quad remeshing)"),
+        ],
+        default='server',
+        update=update_parameters
+    )
+    bpy.types.Scene.trellis2_remesh_method = bpy.props.EnumProperty(
+        name="Remesh/Retopo Method",
+        description="Method for remeshing/retopology: Server-side QDC, Local Quadriflow, or None. Note: QDC (Server) handles decimation natively on the ComfyUI server",
+        items=[
+            ('none', "None (Trimesh)", "Keep triangles (raw or decimated) - no retopology solver"),
+            ('qdc', "QDC (Server)", "Quad Dual Contouring - uniform server-side quad remeshing (handles both decimation and remeshing natively)"),
+            ('quadriflow', "Quadriflow (Local) [Experimental]", "Curvature-adaptive local quad retopology in Blender (Zero-dependency). Note: Experimental, might produce artifacts"),
+        ],
+        default='qdc',
+        update=update_parameters
     )
     bpy.types.Scene.trellis2_post_processing_enabled = bpy.props.BoolProperty(
         name="Post-Processing",
         description="Run ComfyUI-side mesh post-processing (decimation + remeshing). Disable to import the raw mesh for manual retopology",
         default=True, update=update_parameters
     )
+    bpy.types.Scene.trellis2_solidify = bpy.props.BoolProperty(
+        name="Solidify Mesh",
+        description="Apply watertight capping and hollowing to delete internal geometry, saving UV and texture space",
+        default=False, update=update_parameters
+    )
+
     bpy.types.Scene.trellis2_auto_lighting = bpy.props.BoolProperty(
         name="Auto Studio Lighting",
         description="Create a three-point studio lighting rig (key, fill, rim) after import to showcase PBR materials",
@@ -1615,7 +1750,9 @@ def unregister_properties(load_handler, _sg_queue_load_handler):
         'trellis2_ss_steps', 'trellis2_shape_guidance', 'trellis2_shape_steps',
         'trellis2_tex_guidance', 'trellis2_tex_steps', 'trellis2_max_tokens',
         'trellis2_texture_size', 'trellis2_decimation', 'trellis2_remesh',
+        'trellis2_decimate_method', 'trellis2_remesh_method',
         'trellis2_post_processing_enabled',
+        'trellis2_solidify',
         'trellis2_auto_lighting',
         'trellis2_skip_texture', 'trellis2_bg_removal', 'trellis2_background_color',
     ]
@@ -1635,6 +1772,40 @@ def unregister_properties(load_handler, _sg_queue_load_handler):
         del bpy.types.WindowManager.sg_scene_queue_index
     if hasattr(bpy.types.WindowManager, 'sg_show_queue'):
         del bpy.types.WindowManager.sg_show_queue
+
+    # --- Multi-Color Print Palette cleanup ---
+    if hasattr(bpy.types.Scene, 'stablegen_print_palette'):
+        del bpy.types.Scene.stablegen_print_palette
+    if hasattr(bpy.types.Scene, 'stablegen_print_palette_index'):
+        del bpy.types.Scene.stablegen_print_palette_index
+    if hasattr(bpy.types.Scene, 'stablegen_print_preset'):
+        del bpy.types.Scene.stablegen_print_preset
+    if hasattr(bpy.types.Scene, 'stablegen_print_dithered'):
+        del bpy.types.Scene.stablegen_print_dithered
+    if hasattr(bpy.types.Scene, 'stablegen_print_layer_height'):
+        del bpy.types.Scene.stablegen_print_layer_height
+    if hasattr(bpy.types.Scene, 'stablegen_print_model_height'):
+        del bpy.types.Scene.stablegen_print_model_height
+    if hasattr(bpy.types.Scene, 'stablegen_print_smoothing'):
+        del bpy.types.Scene.stablegen_print_smoothing
+    if hasattr(bpy.types.Scene, 'stablegen_print_chroma_threshold'):
+        del bpy.types.Scene.stablegen_print_chroma_threshold
+    if hasattr(bpy.types.Scene, 'stablegen_print_make_solid'):
+        del bpy.types.Scene.stablegen_print_make_solid
+    if hasattr(bpy.types.Scene, 'stablegen_print_raycast_count'):
+        del bpy.types.Scene.stablegen_print_raycast_count
+    if hasattr(bpy.types.Scene, 'stablegen_print_show_advanced'):
+        del bpy.types.Scene.stablegen_print_show_advanced
+    if hasattr(bpy.types.Scene, 'stablegen_print_solver_init'):
+        del bpy.types.Scene.stablegen_print_solver_init
+    if hasattr(bpy.types.Scene, 'stablegen_print_solver_steps'):
+        del bpy.types.Scene.stablegen_print_solver_steps
+    if hasattr(bpy.types.Scene, 'stablegen_print_solver_formula'):
+        del bpy.types.Scene.stablegen_print_solver_formula
+    if hasattr(bpy.types.Scene, 'stablegen_print_scattering_weight'):
+        del bpy.types.Scene.stablegen_print_scattering_weight
+    if hasattr(bpy.types.Scene, 'stablegen_print_saturation_penalty'):
+        del bpy.types.Scene.stablegen_print_saturation_penalty
 
     for attr in (
         'sg_queue_gif_export', 'sg_queue_gif_duration', 'sg_queue_gif_fps',

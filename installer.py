@@ -551,12 +551,11 @@ DEPENDENCIES: Dict[str, Dict[str, Any]] = {
     # --- TRELLIS.2 ---
     "cn_trellis2": {
         "id": "cn_trellis2", "type": "node", "name": "ComfyUI TRELLIS.2",
-        "git_url": "https://github.com/sakalond/ComfyUI-TRELLIS2.git",
-        "commit": "6b0b2148f45bbafa0b86bfd25c63602b63a7aae0",
+        "git_url": "https://github.com/PozzettiAndrea/ComfyUI-TRELLIS2.git",
         "target_dir_relative": "custom_nodes",
         "repo_name": "ComfyUI-TRELLIS2",
         "license": "MIT (Note: textured pipeline uses NVIDIA non-commercial libs)", "packages": ["trellis2"],
-        "pip_packages": ["comfy-env==0.2.0", "numpy<2.0.0"],
+        "pip_packages": ["numpy<2.0.0"],
         "clean_envs": True,
         "run_install_script": True,
         "post_clone_patches": [
@@ -811,11 +810,87 @@ def install_pip_packages(pip_packages: List[str], comfyui_path: Path, force_rein
 
 
 def _apply_all_comfy_env_patches(comfyui_path: Path):
-    """Apply all comfy-env patches (platform tag, wheel fallback, site isolation, dist-info)."""
+    """Apply all comfy-env patches (platform tag, wheel fallback, site isolation, dist-info, validator)."""
     _patch_comfy_env_platform_tag(comfyui_path)
     _patch_comfy_env_wheel_fallback(comfyui_path)
     _patch_comfy_env_user_site_isolation(comfyui_path)
     _patch_comfy_env_distinfo_normalize(comfyui_path)
+    _patch_comfy_env_validator(comfyui_path)
+
+
+def _patch_comfy_env_validator(comfyui_path: Path):
+    """Patch comfy-env's _validate_node_config to strip torch/torchvision instead of crashing."""
+    python_exe = find_comfyui_python(comfyui_path)
+    result = subprocess.run(
+        [python_exe, "-c",
+         "import importlib.util as u, os; s=u.find_spec('comfy_env'); print(os.path.join(os.path.dirname(s.origin), 'packages', 'toml_generator.py') if s and s.origin else '')"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print("  WARNING: Could not locate comfy_env toml_generator.py, skipping validator patch")
+        return
+
+    toml_gen_path = Path(result.stdout.strip().splitlines()[-1])
+    if not toml_gen_path.is_file():
+        print(f"  WARNING: {toml_gen_path} not found, skipping validator patch")
+        return
+
+    content = toml_gen_path.read_text(encoding="utf-8")
+    marker = "# StableGen patch: bypass toml validation crash by stripping torch/torchvision"
+    if marker in content:
+        print("  comfy-env validator patch already applied")
+        return
+
+    old = (
+        "def _validate_node_config(name: str, cfg: ComfyEnvConfig) -> None:\n"
+        "    \"\"\"Reject node configs that try to redefine the workspace torch pin.\"\"\"\n"
+        "    bad = [p for p in cfg.cuda_packages if p in _TORCH_PKGS]\n"
+        "    if bad:\n"
+        "        raise ValueError(\n"
+        "            f\"[{name}] comfy-env.toml has {bad} under [cuda] packages. \"\n"
+        "            \"Plain torch/torchvision/torchaudio are pinned workspace-wide \"\n"
+        "            \"(replicated into every feature so the rattler cache dedupes). \"\n"
+        "            \"Remove them from [cuda] packages -- keep only CUDA-only wheels there \"\n"
+        "            \"(cumesh, flash-attn, cc_torch, nvdiffrast, etc.).\"\n"
+        "        )"
+    )
+
+    if old not in content:
+        old_alt = (
+            "def _validate_node_config(name: str, cfg: ComfyEnvConfig) -> None:\n"
+            "    \"\"\"Reject node configs that try to redefine the workspace torch pin.\"\"\"\n"
+            "    bad = [p for p in cfg.cuda_packages if p in _TORCH_PKGS]\n"
+            "    if bad:\n"
+            "        raise ValueError(\n"
+            "            f\"[{name}] comfy-env.toml has {bad} under [cuda] packages. \"\n"
+            "            \"Plain torch/torchvision/torchaudio are pinned workspace-wide \"\n"
+            "            \"(replicated into every feature so the rattler cache dedupes). \"\n"
+            "            \"Remove them from [cuda] packages -- keep only CUDA-only wheels there \"\n"
+            "            \"(cumesh, flash-attn, cc_torch, nvdiffrast, etc.).\"\n"
+            "        )\n"
+        )
+        if old_alt in content:
+            old = old_alt
+        else:
+            print("  WARNING: Could not find validator anchor in toml_generator.py (already modified?)")
+            return
+
+    new = (
+        "def _validate_node_config(name: str, cfg: ComfyEnvConfig) -> None:\n"
+        "    " + marker + "\n"
+        "    bad = [p for p in cfg.cuda_packages if p in _TORCH_PKGS]\n"
+        "    if bad:\n"
+        "        for p in bad:\n"
+        "            try:\n"
+        "                cfg.cuda_packages.remove(p)\n"
+        "            except ValueError:\n"
+        "                pass\n"
+        "        print(f'[comfy-env] [{name}] stripped plain torch/torchvision from [cuda] packages list', file=sys.stderr)\n"
+    )
+
+    content = content.replace(old, new)
+    toml_gen_path.write_text(content, encoding="utf-8")
+    print("  Patched comfy-env _validate_node_config() to bypass invalid torch/torchvision declarations")
 
 
 def _patch_comfy_env_platform_tag(comfyui_path: Path):
@@ -1157,10 +1232,10 @@ def run_node_install_script(item_details: Dict[str, Any], comfyui_path: Path):
         # the widest wheel coverage for flex_gemm / nvdiffrast.
         #
         # The first attempt's requirements.txt installs downgraded
-        # comfy-env to 0.1.92 on disk (patches wiped).  Restore 0.2.0
+        # comfy-env on disk (patches wiped).  Restore comfy-env
         # with patches before retrying so the new subprocess sees them.
-        print("  Install failed. Restoring comfy-env 0.2.0 + patches for retry...")
-        install_pip_packages(["comfy-env==0.2.0"], comfyui_path, force_reinstall=True)
+        print("  Install failed. Restoring comfy-env + patches for retry...")
+        install_pip_packages(["comfy-env"], comfyui_path, force_reinstall=True)
         _apply_all_comfy_env_patches(comfyui_path)
 
         print("  Retrying with CUDA 12.4 fallback...")
@@ -1673,11 +1748,11 @@ def main():
                     run_node_install_script(item_details, comfyui_base_path)
                     # Fix flex_gemm/triton version mismatch in comfy-env isolated envs
                     _patch_flex_gemm_autotuner(target_full_path)
-                # Force comfy-env back to 0.2.0 and re-apply patches AFTER install.py,
+                # Force comfy-env (latest) and re-apply patches AFTER install.py,
                 # since the node's requirements.txt may pin an older version
                 if item_details.get("pip_packages") and any("comfy-env" in p for p in item_details["pip_packages"]):
-                    print("  Re-installing comfy-env==0.2.0 (overriding node requirements.txt)...")
-                    install_pip_packages(["comfy-env==0.2.0"], comfyui_base_path, force_reinstall=True)
+                    print("  Re-installing comfy-env (overriding node requirements.txt)...")
+                    install_pip_packages(["comfy-env"], comfyui_base_path, force_reinstall=True)
                     _apply_all_comfy_env_patches(comfyui_base_path)
             elif item_details["type"] == "model":
                 target_full_path = comfyui_base_path / item_details["target_path_relative"] / item_details["filename"]

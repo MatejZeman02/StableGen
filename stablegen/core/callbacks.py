@@ -164,3 +164,149 @@ def update_combined(self, context):
     load_handler(None)
 
     return None
+
+
+def update_print_preset(self, context):
+    from . import state as _state
+    if _state._updating_print_preset:
+        return
+    
+    scene = context.scene
+    preset = scene.stablegen_print_preset
+    if preset == 'CUSTOM':
+        return
+        
+    _state._updating_print_preset = True
+    try:
+        scene.stablegen_print_palette.clear()
+        
+        cyan = (0.0, 1.0, 1.0)
+        magenta = (1.0, 0.0, 1.0)
+        yellow = (1.0, 1.0, 0.0)
+        white = (1.0, 1.0, 1.0)
+        black = (0.0, 0.0, 0.0)
+        
+        if preset == 'CMYW_DITHERED':
+            scene.stablegen_print_dithered = True
+            colors = [("Cyan", cyan), ("Magenta", magenta), ("Yellow", yellow), ("White", white)]
+        elif preset == 'CMYK_DITHERED':
+            scene.stablegen_print_dithered = True
+            colors = [("Cyan", cyan), ("Magenta", magenta), ("Yellow", yellow), ("Black", black)]
+        elif preset in ('CMYW_MIXES_SOLID', 'CMYK_MIXES_SOLID'):
+            scene.stablegen_print_dithered = False
+            fourth_color = white if preset == 'CMYW_MIXES_SOLID' else black
+            fourth_name = "White" if preset == 'CMYW_MIXES_SOLID' else "Black"
+            
+            base_colors = [
+                ("Cyan", cyan),
+                ("Magenta", magenta),
+                ("Yellow", yellow),
+                (fourth_name, fourth_color)
+            ]
+            
+            colors = list(base_colors)
+            n_base = len(base_colors)
+            for idx1 in range(n_base):
+                for idx2 in range(idx1 + 1, n_base):
+                    name1, col1 = base_colors[idx1]
+                    name2, col2 = base_colors[idx2]
+                    
+                    def mix(c1, c2, w1, w2):
+                        tot = w1 + w2
+                        return (
+                            (c1[0]*w1 + c2[0]*w2) / tot,
+                            (c1[1]*w1 + c2[1]*w2) / tot,
+                            (c1[2]*w1 + c2[2]*w2) / tot
+                        )
+                    
+                    colors.append((f"{name1}:{name2} 1:1", mix(col1, col2, 1.0, 1.0)))
+                    colors.append((f"{name1}:{name2} 2:1", mix(col1, col2, 2.0, 1.0)))
+                    colors.append((f"{name1}:{name2} 1:2", mix(col1, col2, 1.0, 2.0)))
+                    
+        for name, col in colors:
+            item = scene.stablegen_print_palette.add()
+            item.name = name
+            item.color = col
+            
+    finally:
+        _state._updating_print_preset = False
+
+
+def check_print_preset_match(scene):
+    from . import state as _state
+    if _state._updating_print_preset:
+        return
+        
+    preset = scene.stablegen_print_preset
+    if preset == 'CUSTOM':
+        return
+        
+    cyan = (0.0, 1.0, 1.0)
+    magenta = (1.0, 0.0, 1.0)
+    yellow = (1.0, 1.0, 0.0)
+    white = (1.0, 1.0, 1.0)
+    black = (0.0, 0.0, 0.0)
+    
+    import math
+    def is_close(c1, c2):
+        return all(math.isclose(x, y, abs_tol=1e-4) for x, y in zip(c1, c2))
+        
+    palette = scene.stablegen_print_palette
+    
+    if preset == 'CMYW_DITHERED':
+        if not scene.stablegen_print_dithered or len(palette) != 4:
+            scene.stablegen_print_preset = 'CUSTOM'
+            return
+        expected = [cyan, magenta, yellow, white]
+        for item, exp in zip(palette, expected):
+            if not is_close(item.color, exp):
+                scene.stablegen_print_preset = 'CUSTOM'
+                return
+                
+    elif preset == 'CMYK_DITHERED':
+        if not scene.stablegen_print_dithered or len(palette) != 4:
+            scene.stablegen_print_preset = 'CUSTOM'
+            return
+        expected = [cyan, magenta, yellow, black]
+        for item, exp in zip(palette, expected):
+            if not is_close(item.color, exp):
+                scene.stablegen_print_preset = 'CUSTOM'
+                return
+                
+    elif preset in ('CMYW_MIXES_SOLID', 'CMYK_MIXES_SOLID'):
+        if scene.stablegen_print_dithered or len(palette) != 22:
+            scene.stablegen_print_preset = 'CUSTOM'
+            return
+        fourth_color = white if preset == 'CMYW_MIXES_SOLID' else black
+        base_colors = [cyan, magenta, yellow, fourth_color]
+        
+        expected = list(base_colors)
+        n_base = len(base_colors)
+        for idx1 in range(n_base):
+            for idx2 in range(idx1 + 1, n_base):
+                col1 = base_colors[idx1]
+                col2 = base_colors[idx2]
+                def mix(c1, c2, w1, w2):
+                    tot = w1 + w2
+                    return (
+                        (c1[0]*w1 + c2[0]*w2) / tot,
+                        (c1[1]*w1 + c2[1]*w2) / tot,
+                        (c1[2]*w1 + c2[2]*w2) / tot
+                    )
+                expected.append(mix(col1, col2, 1.0, 1.0))
+                expected.append(mix(col1, col2, 2.0, 1.0))
+                expected.append(mix(col1, col2, 1.0, 2.0))
+                
+        for item, exp in zip(palette, expected):
+            if not is_close(item.color, exp):
+                scene.stablegen_print_preset = 'CUSTOM'
+                return
+
+
+def update_palette_color(self, context):
+    check_print_preset_match(self.id_data)
+
+
+def update_print_dithered(self, context):
+    check_print_preset_match(self.id_data)
+
