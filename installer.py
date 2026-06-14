@@ -592,7 +592,7 @@ DEPENDENCIES: Dict[str, Dict[str, Any]] = {
         "target_dir_relative": "custom_nodes",
         "repo_name": "ComfyUI-TRELLIS2",
         "license": "MIT (Note: textured pipeline uses NVIDIA non-commercial libs)", "packages": ["trellis2"],
-        "pip_packages": ["comfy-env"],
+        "pip_packages": ["comfy-env", "comfy-sparse-attn", "comfy-3d-viewers"],
         "clean_envs": True,
         "run_install_script": True,
         "post_clone_patches": [
