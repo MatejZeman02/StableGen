@@ -1136,7 +1136,7 @@ def _patch_comfy_env_distinfo_normalize(comfyui_path: Path):
     
     # We use a raw string for the regex backslashes, but f-string needed for anchor/marker.
     # To keep it simple, we use a normal string and .replace() instead of f-string
-    _raw_patch = """ANCHOR
+    _raw_patch = r"""ANCHOR
 MARKER
 try:
     _orig_subprocess_run = subprocess.run
